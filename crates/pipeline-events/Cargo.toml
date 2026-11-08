@@ -1,0 +1,13 @@
+[package]
+name = "pipeline-events"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Decodes events emitted by the Pipeline router"
+
+[dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+solana-pubkey = { version = "=4.3.0", features = ["borsh"] }
+
+[dev-dependencies]
+sha2 = "0.10"

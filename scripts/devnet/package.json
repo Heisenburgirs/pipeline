@@ -1,0 +1,15 @@
+{
+    "name": "pipeline-devnet-scripts",
+    "private": true,
+    "type": "module",
+    "description": "Initialise Pipeline on a cluster and run an end-to-end smoke test",
+    "scripts": {
+        "smoke": "node smoke.ts"
+    },
+    "dependencies": {
+        "@pipeline-placeholder/sdk": "file:../../sdk/ts",
+        "@solana-program/system": "^0.16.0",
+        "@solana-program/token": "^0.18.0",
+        "@solana/kit": "^8.4.0"
+    }
+}

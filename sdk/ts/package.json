@@ -1,0 +1,39 @@
+{
+    "name": "@pipeline-placeholder/sdk",
+    "version": "0.1.0",
+    "private": true,
+    "description": "Instruction builders, account and event decoders, fee maths and RPC quoting for the Pipeline router",
+    "license": "Apache-2.0",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "engines": {
+        "node": ">=20.19"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.json",
+        "typecheck": "tsc -p tsconfig.json --noEmit",
+        "test": "npm run typecheck && npm run format:check && vitest run",
+        "fixtures": "cargo run -q -p pipeline-client --example ts_fixtures > test/fixtures.json",
+        "format": "prettier --write .",
+        "format:check": "prettier --check ."
+    },
+    "dependencies": {
+        "@solana/kit": "^8.4.0"
+    },
+    "devDependencies": {
+        "@types/node": "^24.19.2",
+        "prettier": "^3.9.10",
+        "typescript": "^7.0.2",
+        "vitest": "^5.0.4"
+    }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "pipeline-tests"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "LiteSVM integration tests for the Pipeline router and test strategies"
+
+[dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+litesvm = "=0.18.2"
+pipeline-client = { path = "../pipeline-client" }
+pipeline-events = { path = "../pipeline-events" }
+pipeline-quoter = { path = "../pipeline-quoter" }
+pipeline-strategy-interface = { path = "../pipeline-strategy-interface" }
+sha2 = "0.10"
+solana-account = "=4.7.0"
+solana-clock = "~3.2.0"
+solana-instruction = "=3.5.1"
+solana-keypair = "=3.1.2"
+solana-pubkey = "=4.3.0"
+solana-signer = "=3.0.1"
+solana-transaction = { version = "=4.3.0", features = ["serde"] }
+bincode = "1"
+solana-system-interface = { version = "=3.3.0", features = ["bincode"] }
+spl-associated-token-account-interface = "2.0.0"
+spl-token-2022-interface = "3.1.2"
+spl-token-interface = "3.0.0"

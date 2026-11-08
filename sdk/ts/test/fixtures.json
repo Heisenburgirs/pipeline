@@ -1,0 +1,2391 @@
+{
+  "accounts": [
+    {
+      "hex": "9b0caae01efacc82010101010101010101010101010101010101010101010101010101010101010101002f68590000000002020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303fe",
+      "type": "Config",
+      "value": {
+        "admin": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "bump": 254,
+        "listingFeeLamports": "1500000000",
+        "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "paused": true,
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      }
+    },
+    {
+      "hex": "ae6e2777526aa96607070707070707070707070707070707070707070707070707070707070707072100000068747470733a2f2f6578616d706c652e636f6d2f73747261746567792e6a736f6e01000fac9affffffff0300000000000000fd",
+      "type": "Strategy",
+      "value": {
+        "bump": 253,
+        "interfaceVersion": 1,
+        "marketCount": "3",
+        "metadataUri": "https://example.com/strategy.json",
+        "programId": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+        "registeredAt": "-1700000000"
+      }
+    },
+    {
+      "hex": "dbbed53700e3c69a07070707070707070707070707070707070707070707070707070707070707070808080808080808080808080808080808080808080808080808080808080808030d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f000000000000000000000000000000000000000000000000000000000000000010101010101010101010101010101010101010101010101010101010101010101111111111111111111111111111111111111111111111111111111111111111121212121212121212121212121212121212121212121212121212121212121200000000000000000000000000000000000000000000000000000000000000000101010101010101010101010101010101010101010101010101010101010101010078e76800000000fcfb",
+      "type": "Market",
+      "value": {
+        "bump": 252,
+        "createdAt": "1760000000",
+        "createdBy": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "feeAuthorityBump": 251,
+        "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+        "mintCount": 3,
+        "mints": [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+          "11111111111111111111111111111111"
+        ],
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+        "supportsExactOut": true,
+        "vaults": [
+          "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj",
+          "11111111111111111111111111111111"
+        ]
+      }
+    }
+  ],
+  "constants": {
+    "bpsDenominator": 10000,
+    "interfaceVersion": 1,
+    "maxMarketMints": 4,
+    "maxResolveRounds": 4,
+    "minMarketMints": 2,
+    "pipelineFeeBps": 25
+  },
+  "discriminators": {
+    "accounts": {
+      "Config": "9b0caae01efacc82",
+      "Market": "dbbed53700e3c69a",
+      "Strategy": "ae6e2777526aa966"
+    },
+    "eventIxTag": "e445a52e51cb9a1d",
+    "events": {
+      "ConfigChanged": "93195662624d4ec0",
+      "FeesSwept": "60da73884aaacaac",
+      "MarketCreated": "58b882e7e254063a",
+      "MetadataUpdated": "8424d7f6a65abd2c",
+      "StrategyRegistered": "a736030edd25d3d6",
+      "SwapEvent": "40c6cde8260871e2"
+    },
+    "routerInstructions": {
+      "create_market": "67e261ebc8bcfbfe",
+      "init_fee_account": "55a9b9d367996f02",
+      "initialize_config": "d07f1501c2bec446",
+      "register_existing_market": "65a037a696967b36",
+      "register_strategy": "790c404b630fb18f",
+      "swap": "f8c69e91e17587c8",
+      "sweep_fees": "afe1624776422294",
+      "update_config": "1d9efcbf0a53db63",
+      "update_metadata": "aab62bef614ee1ba"
+    },
+    "strategy": {
+      "pipeline_init_market": "b205a016f9ac0de0",
+      "pipeline_market_info": "b4896cadd8074d61",
+      "pipeline_quote": "868b5b3bb62598da",
+      "pipeline_resolve_accounts": "0ce1ed6f2f7b063e",
+      "pipeline_swap": "a1ebc16b9beaa28c"
+    }
+  },
+  "encodings": [
+    {
+      "hex": "000001e8030000000000000000000000",
+      "type": "TradeRequest",
+      "value": {
+        "amount": "1000",
+        "extra": "",
+        "inputIndex": 0,
+        "mode": 0,
+        "outputIndex": 1,
+        "trader": null
+      }
+    },
+    {
+      "hex": "010302ffffffffffffffff011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e05000000000102feff",
+      "type": "TradeRequest",
+      "value": {
+        "amount": "18446744073709551615",
+        "extra": "000102feff",
+        "inputIndex": 3,
+        "mode": 1,
+        "outputIndex": 2,
+        "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD"
+      }
+    },
+    {
+      "hex": "010302ffffffffffffffff011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e05000000000102feffd007000000000000cf07000000000000",
+      "type": "SwapRequest",
+      "value": {
+        "amountSent": "2000",
+        "minAmountOut": "1999",
+        "trade": {
+          "amount": "18446744073709551615",
+          "extra": "000102feff",
+          "inputIndex": 3,
+          "mode": 1,
+          "outputIndex": 2,
+          "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD"
+        }
+      }
+    },
+    {
+      "hex": "3930000000000000feffffffffffffff",
+      "type": "QuoteResult",
+      "value": {
+        "amountIn": "12345",
+        "amountOut": "18446744073709551614"
+      }
+    },
+    {
+      "hex": "030000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0300000010101010101010101010101010101010101010101010101010101010101010101111111111111111111111111111111111111111111111111111111111111111121212121212121212121212121212121212121212121212121212121212121201",
+      "type": "MarketInfo",
+      "value": {
+        "mints": [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc"
+        ],
+        "supportsExactOut": true,
+        "vaults": [
+          "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+          "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj"
+        ]
+      }
+    },
+    {
+      "hex": "000001e803000000000000000000000003",
+      "type": "ResolveRequest",
+      "value": {
+        "round": 3,
+        "trade": {
+          "amount": "1000",
+          "extra": "",
+          "inputIndex": 0,
+          "mode": 0,
+          "outputIndex": 1,
+          "trader": null
+        }
+      }
+    },
+    {
+      "hex": "151515151515151515151515151515151515151515151515151515151515151501",
+      "type": "AccountRef",
+      "value": {
+        "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+        "writable": true
+      }
+    },
+    {
+      "hex": "0200000015151515151515151515151515151515151515151515151515151515151515150116161616161616161616161616161616161616161616161616161616161616160000",
+      "type": "ResolveResult",
+      "value": {
+        "accounts": [
+          {
+            "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+            "writable": true
+          },
+          {
+            "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+            "writable": false
+          }
+        ],
+        "complete": false
+      }
+    },
+    {
+      "hex": "0000000001",
+      "type": "ResolveResult",
+      "value": {
+        "accounts": [],
+        "complete": true
+      }
+    },
+    {
+      "hex": "2a0000000000000002020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303",
+      "type": "ConfigArgs",
+      "value": {
+        "listingFeeLamports": "42",
+        "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      }
+    },
+    {
+      "hex": "00010001ffffffffffffffff00010303030303030303030303030303030303030303030303030303030303030303",
+      "type": "UpdateConfigArgs",
+      "value": {
+        "admin": null,
+        "listingFeeLamports": "18446744073709551615",
+        "listingFeeRecipient": null,
+        "paused": false,
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      }
+    },
+    {
+      "hex": "0000000000",
+      "type": "UpdateConfigArgs",
+      "value": {
+        "admin": null,
+        "listingFeeLamports": null,
+        "listingFeeRecipient": null,
+        "paused": null,
+        "treasuryOwner": null
+      }
+    },
+    {
+      "hex": "01102700000000000028230000000000002723000000000000ffff0202000000dead",
+      "type": "SwapArgs",
+      "value": {
+        "amountIn": "10000",
+        "amountOut": "9000",
+        "extra": "dead",
+        "inputHookAccounts": 2,
+        "integratorFeeBps": 65535,
+        "minAmountOut": "8999",
+        "mode": 1
+      }
+    },
+    {
+      "hex": "102700000000000028230000000000001900000000000000ffffffffffffffff",
+      "type": "SwapResult",
+      "value": {
+        "integratorFee": "18446744073709551615",
+        "netSent": "10000",
+        "pipelineFee": "25",
+        "received": "9000"
+      }
+    }
+  ],
+  "events": [
+    {
+      "hex": "e445a52e51cb9a1d40c6cde8260871e2282828282828282828282828282828282828282828282828282828282828282807070707070707070707070707070707070707070707070707070707070707071e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0140420f000000000088360f0000000000c409000000000000011414141414141414141414141414141414141414141414141414141414141414881300000000000015cd5b07000000000078e76800000000",
+      "type": "Swap",
+      "value": {
+        "inputMint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "integrator": "2MNus2KCpxwXnp19iyXNpWSFtBD2UGjQBAL8AbtywfT9",
+        "integratorFee": "5000",
+        "market": "3hkpj3dQevt4ad1JSx3ke1sWmMR3wYToMKfFLCnxtKuH",
+        "mode": 1,
+        "netSent": "1000000",
+        "outputMint": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+        "pipelineFee": "2500",
+        "received": "997000",
+        "slot": "123456789",
+        "strategy": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+        "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+        "unixTimestamp": "1760000000"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1d40c6cde8260871e2282828282828282828282828282828282828282828282828282828282828282807070707070707070707070707070707070707070707070707070707070707071e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d00ffffffffffffffff0000000000000000d8a3703d0ad7a3000000000000000000000100000000000000fbffffffffffffff",
+      "type": "Swap",
+      "value": {
+        "inputMint": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+        "integrator": null,
+        "integratorFee": "0",
+        "market": "3hkpj3dQevt4ad1JSx3ke1sWmMR3wYToMKfFLCnxtKuH",
+        "mode": 0,
+        "netSent": "18446744073709551615",
+        "outputMint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "pipelineFee": "46116860184273880",
+        "received": "0",
+        "slot": "1",
+        "strategy": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+        "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+        "unixTimestamp": "-5"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1da736030edd25d3d60707070707070707070707070707070707070707070707070707070707070707002f6859000000002100000068747470733a2f2f6578616d706c652e636f6d2f73747261746567792e6a736f6e",
+      "type": "StrategyRegistered",
+      "value": {
+        "feePaid": "1500000000",
+        "metadataUri": "https://example.com/strategy.json",
+        "strategy": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1d8424d7f6a65abd2c070707070707070707070707070707070707070707070707070707070707070713000000697066733a2f2f6d6574616461746120e29c93",
+      "type": "MetadataUpdated",
+      "value": {
+        "metadataUri": "ipfs://metadata ✓",
+        "strategy": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1d58b882e7e254063a282828282828282828282828282828282828282828282828282828282828282807070707070707070707070707070707070707070707070707070707070707070808080808080808080808080808080808080808080808080808080808080808020000000d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0101010101010101010101010101010101010101010101010101010101010101",
+      "type": "MarketCreated",
+      "value": {
+        "createdBy": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "market": "3hkpj3dQevt4ad1JSx3ke1sWmMR3wYToMKfFLCnxtKuH",
+        "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+        "mints": [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu"
+        ],
+        "strategy": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1d60da73884aaacaac28282828282828282828282828282828282828282828282828282828282828280d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d4d00000000000000",
+      "type": "FeesSwept",
+      "value": {
+        "amount": "77",
+        "market": "3hkpj3dQevt4ad1JSx3ke1sWmMR3wYToMKfFLCnxtKuH",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC"
+      }
+    },
+    {
+      "hex": "e445a52e51cb9a1d93195662624d4ec0010101010101010101010101010101010101010101010101010101010101010100000000000000000002020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303",
+      "type": "ConfigChanged",
+      "value": {
+        "admin": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "listingFeeLamports": "0",
+        "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "paused": false,
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      }
+    }
+  ],
+  "fees": {
+    "amountForBudget": [
+      {
+        "budget": "0",
+        "integratorFeeBps": 0,
+        "result": "0"
+      },
+      {
+        "budget": "0",
+        "integratorFeeBps": 1,
+        "result": "0"
+      },
+      {
+        "budget": "0",
+        "integratorFeeBps": 50,
+        "result": "0"
+      },
+      {
+        "budget": "0",
+        "integratorFeeBps": 100,
+        "result": "0"
+      },
+      {
+        "budget": "0",
+        "integratorFeeBps": 9999,
+        "result": "0"
+      },
+      {
+        "budget": "0",
+        "integratorFeeBps": 65535,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 0,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 1,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 50,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 100,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 9999,
+        "result": "0"
+      },
+      {
+        "budget": "1",
+        "integratorFeeBps": 65535,
+        "result": "0"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 0,
+        "result": "1"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 1,
+        "result": "0"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 50,
+        "result": "0"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 100,
+        "result": "0"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 9999,
+        "result": "0"
+      },
+      {
+        "budget": "2",
+        "integratorFeeBps": 65535,
+        "result": "0"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 0,
+        "result": "400"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 1,
+        "result": "400"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 50,
+        "result": "399"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 100,
+        "result": "397"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 9999,
+        "result": "200"
+      },
+      {
+        "budget": "402",
+        "integratorFeeBps": 65535,
+        "result": "53"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 0,
+        "result": "996"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 1,
+        "result": "995"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 50,
+        "result": "991"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 100,
+        "result": "986"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 9999,
+        "result": "498"
+      },
+      {
+        "budget": "999",
+        "integratorFeeBps": 65535,
+        "result": "132"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 0,
+        "result": "997"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 1,
+        "result": "996"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 50,
+        "result": "992"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 100,
+        "result": "987"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 9999,
+        "result": "499"
+      },
+      {
+        "budget": "1000",
+        "integratorFeeBps": 65535,
+        "result": "132"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 0,
+        "result": "997506"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 1,
+        "result": "997406"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 50,
+        "result": "992555"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 100,
+        "result": "987653"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 9999,
+        "result": "499400"
+      },
+      {
+        "budget": "1000000",
+        "integratorFeeBps": 65535,
+        "result": "132345"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 0,
+        "result": "123148916"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 1,
+        "result": "123136633"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 50,
+        "result": "122537755"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 100,
+        "result": "121932630"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 9999,
+        "result": "61654408"
+      },
+      {
+        "budget": "123456789",
+        "integratorFeeBps": 65535,
+        "result": "16338907"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 0,
+        "result": "9200371109082070630"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 1,
+        "result": "9199453457864328552"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 50,
+        "result": "9154711699111440005"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 100,
+        "result": "9109503246276321784"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 9999,
+        "result": "4606158628073699463"
+      },
+      {
+        "budget": "9223372036854775807",
+        "integratorFeeBps": 65535,
+        "result": "1220668612606508179"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 0,
+        "result": "18400742218164141261"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 1,
+        "result": "18398906915728657106"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 50,
+        "result": "18309423398222880013"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 100,
+        "result": "18219006492552643570"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 9999,
+        "result": "9212317256147398928"
+      },
+      {
+        "budget": "18446744073709551615",
+        "integratorFeeBps": 65535,
+        "result": "2441337225213016359"
+      }
+    ],
+    "ceilBps": [
+      {
+        "amount": "0",
+        "bps": "25",
+        "result": "0"
+      },
+      {
+        "amount": "1",
+        "bps": "25",
+        "result": "1"
+      },
+      {
+        "amount": "1",
+        "bps": "0",
+        "result": "0"
+      },
+      {
+        "amount": "399",
+        "bps": "25",
+        "result": "1"
+      },
+      {
+        "amount": "400",
+        "bps": "25",
+        "result": "1"
+      },
+      {
+        "amount": "401",
+        "bps": "25",
+        "result": "2"
+      },
+      {
+        "amount": "10000",
+        "bps": "25",
+        "result": "25"
+      },
+      {
+        "amount": "10001",
+        "bps": "25",
+        "result": "26"
+      },
+      {
+        "amount": "123456789",
+        "bps": "9999",
+        "result": "123444444"
+      },
+      {
+        "amount": "18446744073709551615",
+        "bps": "25",
+        "result": "46116860184273880"
+      },
+      {
+        "amount": "18446744073709551615",
+        "bps": "10000",
+        "result": "18446744073709551615"
+      },
+      {
+        "amount": "18446744073709551615",
+        "bps": "10001",
+        "result": null
+      },
+      {
+        "amount": "18446744073709551615",
+        "bps": "18446744073709551615",
+        "result": null
+      }
+    ],
+    "maxTotalSpend": [
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 0,
+        "result": "0"
+      },
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 1,
+        "result": "0"
+      },
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 50,
+        "result": "0"
+      },
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 100,
+        "result": "0"
+      },
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 9999,
+        "result": "0"
+      },
+      {
+        "amountSent": "0",
+        "integratorFeeBps": 65535,
+        "result": "0"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 0,
+        "result": "2"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 1,
+        "result": "3"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 50,
+        "result": "3"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 100,
+        "result": "3"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 9999,
+        "result": "3"
+      },
+      {
+        "amountSent": "1",
+        "integratorFeeBps": 65535,
+        "result": "9"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 0,
+        "result": "401"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 1,
+        "result": "402"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 50,
+        "result": "403"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 100,
+        "result": "405"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 9999,
+        "result": "801"
+      },
+      {
+        "amountSent": "400",
+        "integratorFeeBps": 65535,
+        "result": "3023"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 0,
+        "result": "403"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 1,
+        "result": "404"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 50,
+        "result": "406"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 100,
+        "result": "408"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 9999,
+        "result": "804"
+      },
+      {
+        "amountSent": "401",
+        "integratorFeeBps": 65535,
+        "result": "3031"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 0,
+        "result": "1002500"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 1,
+        "result": "1002600"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 50,
+        "result": "1007500"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 100,
+        "result": "1012500"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 9999,
+        "result": "2002400"
+      },
+      {
+        "amountSent": "1000000",
+        "integratorFeeBps": 65535,
+        "result": "7556000"
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 0,
+        "result": "9246430466946912747"
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 1,
+        "result": "9247352804150598225"
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 50,
+        "result": "9292547327131186627"
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 100,
+        "result": "9338664187315460506"
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 9999,
+        "result": null
+      },
+      {
+        "amountSent": "9223372036854775807",
+        "integratorFeeBps": 65535,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 0,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 1,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 50,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 100,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 9999,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551614",
+        "integratorFeeBps": 65535,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 0,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 1,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 50,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 100,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 9999,
+        "result": null
+      },
+      {
+        "amountSent": "18446744073709551615",
+        "integratorFeeBps": 65535,
+        "result": null
+      }
+    ],
+    "pipelineFee": [
+      {
+        "netSent": "0",
+        "result": "0"
+      },
+      {
+        "netSent": "1",
+        "result": "1"
+      },
+      {
+        "netSent": "399",
+        "result": "1"
+      },
+      {
+        "netSent": "400",
+        "result": "1"
+      },
+      {
+        "netSent": "401",
+        "result": "2"
+      },
+      {
+        "netSent": "10000",
+        "result": "25"
+      },
+      {
+        "netSent": "10001",
+        "result": "26"
+      },
+      {
+        "netSent": "9223372036854775807",
+        "result": "23058430092136940"
+      },
+      {
+        "netSent": "18446744073709551615",
+        "result": "46116860184273880"
+      }
+    ]
+  },
+  "instructions": [
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3dpKiLEDnLxCDBybnc5N9iVSLDWpvVBhE4971w59JETL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "d07f1501c2bec446002f68590000000002020202020202020202020202020202020202020202020202020202020202020303030303030303030303030303030303030303030303030303030303030303",
+      "inputs": {
+        "admin": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "args": {
+          "listingFeeLamports": "1500000000",
+          "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+          "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+        }
+      },
+      "name": "initializeConfig",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "1d9efcbf0a53db6301040404040404040404040404040404040404040404040404040404040404040401010001050505050505050505050505050505050505050505050505050505050505050500",
+      "inputs": {
+        "admin": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "args": {
+          "admin": "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+          "listingFeeLamports": null,
+          "listingFeeRecipient": "LbUiWL3xVV8hTFYBVdbTNrpDo41NKS6o3LHHuDzjfcY",
+          "paused": true,
+          "treasuryOwner": null
+        }
+      },
+      "name": "updateConfig",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "1d9efcbf0a53db630000000000",
+      "inputs": {
+        "admin": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "args": {
+          "admin": null,
+          "listingFeeLamports": null,
+          "listingFeeRecipient": null,
+          "paused": null,
+          "treasuryOwner": null
+        }
+      },
+      "name": "updateConfig",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "4yrM33Q1cAjX6urcAiqhHzoBmbm2HaeYLvFQiP7mGWdX",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "6Lu83KEiYTJhRRCaxo8kDEDKBAGUpX7Ej5ToWK3uCTuD",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "790c404b630fb18f2100000068747470733a2f2f6578616d706c652e636f6d2f73747261746567792e6a736f6e01",
+      "inputs": {
+        "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "metadataUri": "https://example.com/strategy.json",
+        "payer": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "registrar": "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "name": "registerStrategy",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "4yrM33Q1cAjX6urcAiqhHzoBmbm2HaeYLvFQiP7mGWdX",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6Lu83KEiYTJhRRCaxo8kDEDKBAGUpX7Ej5ToWK3uCTuD",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "aab62bef614ee1ba0f000000697066733a2f2f6d65746164617461",
+      "inputs": {
+        "metadataUri": "ipfs://metadata",
+        "registrar": "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "name": "updateMetadata",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6Lu83KEiYTJhRRCaxo8kDEDKBAGUpX7Ej5ToWK3uCTuD",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "DJ7UmpSQ1mdoRFfiUS44zSvnyV7PK8YLAKrwKqBKes6",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "gBxS1f6uyyGPuW5MzGBukidSb71jdsCb5fZaoSzULE5",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "p2Yicb86aZig616Eav2VWG9vuXR5mEqhtzshZYBxzsV",
+          "isSigner": true,
+          "isWritable": false
+        }
+      ],
+      "data": "67e261ebc8bcfbfe04000000010203ff15cd5b0700000000",
+      "inputs": {
+        "creator": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "initData": "010203ff",
+        "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+        "marketStateSigns": true,
+        "maxCreatorLamports": "123456789",
+        "strategyAccounts": [
+          {
+            "address": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+            "isSigner": false,
+            "isWritable": true
+          },
+          {
+            "address": "gBxS1f6uyyGPuW5MzGBukidSb71jdsCb5fZaoSzULE5",
+            "isSigner": false,
+            "isWritable": false
+          },
+          {
+            "address": "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+            "isSigner": true,
+            "isWritable": true
+          },
+          {
+            "address": "p2Yicb86aZig616Eav2VWG9vuXR5mEqhtzshZYBxzsV",
+            "isSigner": true,
+            "isWritable": false
+          }
+        ],
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "name": "createMarket",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6Lu83KEiYTJhRRCaxo8kDEDKBAGUpX7Ej5ToWK3uCTuD",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "65a037a696967b36",
+      "inputs": {
+        "infoAccounts": [
+          {
+            "address": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+            "isSigner": false,
+            "isWritable": false
+          }
+        ],
+        "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+        "payer": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "name": "registerExistingMarket",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6tCyN9WpQwMfp1PgrxCnKrbYMoe8b29KQKDNRiAYxEzQ",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "55a9b9d367996f02",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "payer": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "name": "initFeeAccount",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+          "isSigner": true,
+          "isWritable": true
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "GGjNjt7XsvmjAbyGPcujdv7rCmzWnqF53H9JpyfsipAy",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "55a9b9d367996f02",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "payer": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+        "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+      },
+      "name": "initFeeAccount",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "GGjNjt7XsvmjAbyGPcujdv7rCmzWnqF53H9JpyfsipAy",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "2MNus2KCpxwXnp19iyXNpWSFtBD2UGjQBAL8AbtywfT9",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2d46SEBFCA8SMB1BUAq3z1XJrp3qAXUgQnzkQ85Nvzjy",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "2gyPaXeFnTRfVGFguU9yGtJ56yG2qbAVyCfQTW7ygL4g",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "f8c69e91e17587c801ffffffffffffffffd204000000000000e80300000000000032000303000000090807",
+      "inputs": {
+        "accounts": {
+          "inputHookAccounts": [
+            {
+              "address": "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+              "isSigner": false,
+              "isWritable": false
+            },
+            {
+              "address": "2d46SEBFCA8SMB1BUAq3z1XJrp3qAXUgQnzkQ85Nvzjy",
+              "isSigner": false,
+              "isWritable": true
+            },
+            {
+              "address": "2gyPaXeFnTRfVGFguU9yGtJ56yG2qbAVyCfQTW7ygL4g",
+              "isSigner": false,
+              "isWritable": false
+            }
+          ],
+          "inputMint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "inputTokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "inputVault": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "integratorFeeAccount": "2MNus2KCpxwXnp19iyXNpWSFtBD2UGjQBAL8AbtywfT9",
+          "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "outputMint": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "outputTokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "strategyAccounts": [
+            {
+              "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+              "isSigner": false,
+              "isWritable": true
+            },
+            {
+              "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+              "isSigner": false,
+              "isWritable": false
+            }
+          ],
+          "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+          "traderInput": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+          "traderOutput": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd"
+        },
+        "args": {
+          "amountIn": "18446744073709551615",
+          "amountOut": "1234",
+          "extra": "090807",
+          "inputHookAccounts": 0,
+          "integratorFeeBps": 50,
+          "minAmountOut": "1000",
+          "mode": 1
+        }
+      },
+      "name": "swap",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+          "isSigner": true,
+          "isWritable": false
+        },
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6tCyN9WpQwMfp1PgrxCnKrbYMoe8b29KQKDNRiAYxEzQ",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "f8c69e91e17587c80040420f00000000000000000000000000301b0f000000000000000000000000",
+      "inputs": {
+        "accounts": {
+          "inputHookAccounts": [],
+          "inputMint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "inputTokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "inputVault": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "integratorFeeAccount": null,
+          "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "outputMint": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "outputTokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "strategyAccounts": [],
+          "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+          "traderInput": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+          "traderOutput": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd"
+        },
+        "args": {
+          "amountIn": "1000000",
+          "amountOut": "0",
+          "extra": "",
+          "inputHookAccounts": 7,
+          "integratorFeeBps": 0,
+          "minAmountOut": "990000",
+          "mode": 0
+        }
+      },
+      "name": "swap",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "GGjNjt7XsvmjAbyGPcujdv7rCmzWnqF53H9JpyfsipAy",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "385vpMX9S36KpSg54xyEp6fVP4feDTPZgXVciMB2bqaz",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "afe1624776422294",
+      "inputs": {
+        "hookAccounts": [
+          {
+            "address": "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+            "isSigner": false,
+            "isWritable": false
+          }
+        ],
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      },
+      "name": "sweepFees",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "6tCyN9WpQwMfp1PgrxCnKrbYMoe8b29KQKDNRiAYxEzQ",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "5Wy8cn3J6cweSHZg7QvngScUrf8qFd2hvPHa9whJUnsQ",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "afe1624776422294",
+      "inputs": {
+        "hookAccounts": [],
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "treasuryOwner": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+      },
+      "name": "sweepFees",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    }
+  ],
+  "keys": [
+    "11111111111111111111111111111111",
+    "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
+    "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+    "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8",
+    "GgBaCs3NCBuZN12kCJgAW63ydqohFkHEdfdEXBPzLHq",
+    "LbUiWL3xVV8hTFYBVdbTNrpDo41NKS6o3LHHuDzjfcY",
+    "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",
+    "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+    "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+    "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+    "gBxS1f6uyyGPuW5MzGBukidSb71jdsCb5fZaoSzULE5",
+    "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+    "p2Yicb86aZig616Eav2VWG9vuXR5mEqhtzshZYBxzsV",
+    "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+    "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+    "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+    "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+    "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+    "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj",
+    "2HTciirCEfeJeikeHgCTXdfVe1zpoD3ackfU7DrPCL8S",
+    "2MNus2KCpxwXnp19iyXNpWSFtBD2UGjQBAL8AbtywfT9",
+    "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+    "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+    "2Z8oHviEbrqDD5kg2sW8h8kYceqdVTnrrPL6Lk2nBfRG",
+    "2d46SEBFCA8SMB1BUAq3z1XJrp3qAXUgQnzkQ85Nvzjy",
+    "2gyPaXeFnTRfVGFguU9yGtJ56yG2qbAVyCfQTW7ygL4g",
+    "2ktgiq7GNkitdMWCLmUtZm4qM8UEWerKXcL4WtAaRfPP",
+    "2poys8aGy427mSkhn4oordqbbHgSBiY961ziaGDBAzi6",
+    "2tjH1S3HZMKLuY1DDN8j9WcMqStdrnDxeRfNdeFmvL2o",
+    "2xea9jWJ9eca3dFiefTeSPP85c6qXqunCqL2h2JNffMW",
+    "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+    "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+    "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
+    "3EKkiwNLWqoUbzFkPrmKbtUB4EweE6f4STzevYUmezeL",
+    "3JF3sEqM796hk5WFqA6EtmEwJQ9quALszsfJyvXNQKy3",
+    "3NAM1YJMhSPvtAkmGTRABe1hYZN3aE2hZHKy3JZy9fHk",
+    "3S5e9qmNHjhA2G1Ghkk5UWnTniaFFHiX7gzd6gcZtzcT",
+    "3VzwJ9ENt2zPAMFn944zmPZE2snSvMQLg6fHA4fAeKwA",
+    "3ZvESShPULHcJSWHaMPv4GKzH2zebR6AEWKwDShmPfFs",
+    "3dqXakAQ4daqSXko1eiqM96kXCCrGUmynuzbGpkN8zaa",
+    "3hkpj3dQevt4ad1JSx3ke1sWmMR3wYToMKfFLCnxtKuH"
+  ],
+  "pdas": [
+    {
+      "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+      "inputs": {},
+      "kind": "config"
+    },
+    {
+      "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+      "inputs": {},
+      "kind": "eventAuthority"
+    },
+    {
+      "address": "6Lu83KEiYTJhRRCaxo8kDEDKBAGUpX7Ej5ToWK3uCTuD",
+      "inputs": {
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "kind": "strategy"
+    },
+    {
+      "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+      "inputs": {
+        "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "kind": "market"
+    },
+    {
+      "address": "E91LWYZqpGAtUa8zxFrszueCivrTTUyp4PfQNyJyGPfP",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej"
+      },
+      "kind": "feeAuthority"
+    },
+    {
+      "address": "DJ7UmpSQ1mdoRFfiUS44zSvnyV7PK8YLAKrwKqBKes6",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej"
+      },
+      "kind": "setupPayer"
+    },
+    {
+      "address": "6tCyN9WpQwMfp1PgrxCnKrbYMoe8b29KQKDNRiAYxEzQ",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "kind": "feeAccount"
+    },
+    {
+      "address": "GGjNjt7XsvmjAbyGPcujdv7rCmzWnqF53H9JpyfsipAy",
+      "inputs": {
+        "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+      },
+      "kind": "feeAccount"
+    },
+    {
+      "address": "8cUSHJrDB81E47d2NWoabrBfH3DPShrRxcaWWFCokw5A",
+      "inputs": {
+        "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "kind": "register"
+    },
+    {
+      "address": "3dpKiLEDnLxCDBybnc5N9iVSLDWpvVBhE4971w59JETL",
+      "inputs": {
+        "program": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+      },
+      "kind": "programData"
+    },
+    {
+      "address": "4yrM33Q1cAjX6urcAiqhHzoBmbm2HaeYLvFQiP7mGWdX",
+      "inputs": {
+        "program": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+      },
+      "kind": "programData"
+    },
+    {
+      "address": "Eq2BeejczunYYZnQzXV2zj9hkj9SUPBW36sHjyA4QaQp",
+      "inputs": {
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "owner": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+        "tokenProgram": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+      },
+      "kind": "associatedToken"
+    },
+    {
+      "address": "265Y1y11kFKX1vzCEnET8XZLqtuqxYzGX5YRWMcrmu4C",
+      "inputs": {
+        "mint": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+        "owner": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+        "tokenProgram": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+      },
+      "kind": "associatedToken"
+    }
+  ],
+  "programIds": {
+    "associatedToken": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL",
+    "bpfLoaderUpgradeable": "BPFLoaderUpgradeab1e11111111111111111111111",
+    "router": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+    "routerBytes": "05d191f3b8b52ec383db58c7edbfd7be6c7bddab20d405bcdbffea368859b6ff",
+    "system": "11111111111111111111111111111111",
+    "token": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    "token2022": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+  },
+  "strategyInstructions": [
+    {
+      "accounts": [
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "7yWTGNqQQZgc3EJfp8ZvkpTE3cpP9ZHUWNFhrbiFzrax",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3wcxo3aL2UwWKp8AvADfFVBDPN4W5brMSNBQKuFwmDF8",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "868b5b3bb62598da0002010903000000000000011e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e0100000001",
+      "inputs": {
+        "market": {
+          "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "mints": [
+            "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+            "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+            "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc"
+          ],
+          "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "supportsExactOut": true,
+          "tokenPrograms": [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          ],
+          "vaults": [
+            "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+            "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+            "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj"
+          ]
+        },
+        "strategyAccounts": [
+          {
+            "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+            "isSigner": false,
+            "isWritable": true
+          },
+          {
+            "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+            "isSigner": false,
+            "isWritable": false
+          }
+        ],
+        "trade": {
+          "amount": "777",
+          "extra": "01",
+          "inputIndex": 2,
+          "mode": 0,
+          "outputIndex": 1,
+          "trader": "32ZsJ2yJjwuoBiWE5xnZjG9tKmK3CubbmEzgkQLyQzgD"
+        }
+      },
+      "name": "quote",
+      "programAddress": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    },
+    {
+      "accounts": [
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2eNHrti7aNcpWbPobDoVgzJaK4p3ngSd298h8JpyU31w",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "EsPEjYnLrErJKc3P2Ja9LscTewspyMcBi6pYn4gGrpRF",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "0ce1ed6f2f7b063e0100010500000000000000000000000000",
+      "inputs": {
+        "known": [],
+        "market": {
+          "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "mints": [
+            "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+            "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+            "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc"
+          ],
+          "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "supportsExactOut": true,
+          "tokenPrograms": [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          ],
+          "vaults": [
+            "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+            "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+            "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj"
+          ]
+        },
+        "round": 0,
+        "trade": {
+          "amount": "5",
+          "extra": "",
+          "inputIndex": 0,
+          "mode": 1,
+          "outputIndex": 1,
+          "trader": null
+        }
+      },
+      "name": "resolveAccounts",
+      "programAddress": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    },
+    {
+      "accounts": [
+        {
+          "address": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "11111111111111111111111111111111",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2eNHrti7aNcpWbPobDoVgzJaK4p3ngSd298h8JpyU31w",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "EsPEjYnLrErJKc3P2Ja9LscTewspyMcBi6pYn4gGrpRF",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "0ce1ed6f2f7b063e0100010500000000000000000000000002",
+      "inputs": {
+        "known": [
+          {
+            "address": "2RJD1KnDRGEkvuFfAGrJ7PD28LRE9LRDjZznDywagzmr",
+            "isSigner": false,
+            "isWritable": true
+          },
+          {
+            "address": "2VDW9dFE1ZXz4zWAbaBDQFynNVdRpQ73HyfSHMzBSL6Z",
+            "isSigner": false,
+            "isWritable": false
+          }
+        ],
+        "market": {
+          "market": "6gmoXp6ySebjvUKc58pWWJDtNZvSFFhfWniqpwcabbej",
+          "marketState": "YMN9Qj5jPNp7j14VPcML1B6xGgcPWVZUGLFU3Mnyfaf",
+          "mints": [
+            "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+            "ws91DX9HBAAxGW77BZs5FogRDwpRtcUpiLBpKdPTfWu",
+            "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc"
+          ],
+          "strategyProgram": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          "supportsExactOut": true,
+          "tokenPrograms": [
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+            "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+          ],
+          "vaults": [
+            "25hjHpTATmkdET17ynDhf1MCuYNDn1z7wXfVw5iaxLAK",
+            "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+            "2DYKaRPBeNM5WdW8rNsYEktjPrnd89Mm4Lzp3qonSzoj"
+          ]
+        },
+        "round": 2,
+        "trade": {
+          "amount": "5",
+          "extra": "",
+          "inputIndex": 0,
+          "mode": 1,
+          "outputIndex": 1,
+          "trader": null
+        }
+      },
+      "name": "resolveAccounts",
+      "programAddress": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx"
+    }
+  ]
+}

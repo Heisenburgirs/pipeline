@@ -1,0 +1,15 @@
+[package]
+name = "test-strategy-evil"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Hostile strategy used to test the Pipeline router"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "test_strategy_evil"
+
+[dependencies]
+borsh = "1.5"
+pipeline-strategy-interface = { path = "../../crates/pipeline-strategy-interface" }
+solana-program = "3"

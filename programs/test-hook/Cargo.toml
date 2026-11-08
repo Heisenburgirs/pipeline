@@ -1,0 +1,13 @@
+[package]
+name = "test-hook"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Token-2022 transfer hook used in Pipeline tests"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "test_hook"
+
+[dependencies]
+solana-program = "3"

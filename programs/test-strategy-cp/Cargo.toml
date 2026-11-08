@@ -1,0 +1,26 @@
+[package]
+name = "test-strategy-cp"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Constant-product strategy used to test the Pipeline router; basis of the strategy template"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "test_strategy_cp"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.2", features = ["init-if-needed"] }
+anchor-spl = "=1.2.2"
+pipeline-strategy-interface = { path = "../../crates/pipeline-strategy-interface" }

@@ -1,0 +1,17 @@
+.context/
+target/
+**/target/
+node_modules/
+.DS_Store
+reference/v4/**/out/
+reference/v4/**/cache/
+*.so
+test-ledger/
+
+# Solana keypairs are never committed. Pipeline's keys live in ~/.config/pipeline/keys/.
+*keypair*.json
+devnet-admin.json
+cp-strategy.json
+id.json
+PiPE*.json
+**/keys/

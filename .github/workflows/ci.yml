@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    env:
+      # Test binaries link every Solana crate; without debug info they're a fraction of
+      # the size, which keeps the runner's disk from filling up.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Cache cargo and Solana tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/cargo-build-sbf
+            ~/.cargo/bin/cargo-test-sbf
+            ~/.cache/solana
+            target
+            programs/target
+          key: ${{ runner.os }}-pipeline-v3-${{ hashFiles('Cargo.lock', 'programs/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-pipeline-v3-
+
+      - name: No keypairs in the repository
+        run: scripts/check-no-keypairs.sh
+
+      - name: Install cargo-build-sbf (sBPF v3 toolchain)
+        # The cache may already hold the binary; reinstall only if the version differs.
+        run: |
+          if ! cargo build-sbf --version 2>/dev/null | grep -q "4.6.0"; then
+            cargo install cargo-build-sbf --version 4.6.0 --locked --force
+          fi
+
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check
+          (cd programs && cargo fmt --all -- --check)
+
+      - name: Build on-chain programs
+        working-directory: programs
+        run: cargo build-sbf
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  typescript-sdk:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: sdk/ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm test

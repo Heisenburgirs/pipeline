@@ -1,0 +1,21 @@
+[package]
+name = "pipeline-quoter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Quotes any Pipeline strategy by running its on-chain code in an embedded Solana VM"
+
+[dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+litesvm = "=0.18.2"
+pipeline-client = { path = "../pipeline-client" }
+pipeline-strategy-interface = { path = "../pipeline-strategy-interface" }
+solana-account = "=4.7.0"
+solana-clock = "~3.2.0"
+solana-instruction = "=3.5.1"
+solana-keypair = "=3.1.2"
+solana-pubkey = "=4.3.0"
+solana-signer = "=3.0.1"
+solana-transaction = "=4.3.0"
+spl-token-2022-interface = "3.1.2"
+thiserror = "2"
