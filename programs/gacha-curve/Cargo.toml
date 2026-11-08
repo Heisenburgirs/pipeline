@@ -1,0 +1,27 @@
+[package]
+name = "gacha-curve"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bonding-curve strategy for Pipeline with an opt-in gacha: buyers pay a fee into a token pot and may win a bonus from it"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "gacha_curve"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.2", features = ["init-if-needed"] }
+anchor-spl = "=1.2.2"
+pipeline-strategy-interface = { path = "../../crates/pipeline-strategy-interface" }
+solana-sha256-hasher = { version = "3.1.0", default-features = false }

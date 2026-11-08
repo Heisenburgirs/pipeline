@@ -807,6 +807,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gacha-curve"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+ "pipeline-strategy-interface",
+ "solana-sha256-hasher",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

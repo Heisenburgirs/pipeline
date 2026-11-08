@@ -37,6 +37,7 @@ devnet in a few minutes.
 |---|---|
 | Try it on devnet | [`docs/DEVNET.md`](docs/DEVNET.md) |
 | Build your own AMM or market | [`docs/QUICKSTART.md`](docs/QUICKSTART.md), then [`docs/STRATEGY-GUIDE.md`](docs/STRATEGY-GUIDE.md) |
+| See a strategy with per-trader state and a custom payout action | [`docs/GACHA-CURVE.md`](docs/GACHA-CURVE.md) |
 | Build a desk, terminal, bot or chart on top | [`docs/INTEGRATOR-GUIDE.md`](docs/INTEGRATOR-GUIDE.md) |
 | Understand the router | [`docs/ROUTER.md`](docs/ROUTER.md) |
 | See how it's verified and audited | [`docs/VERIFICATION.md`](docs/VERIFICATION.md), [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) |
@@ -47,6 +48,7 @@ devnet in a few minutes.
 |---|---|---|
 | `programs/pipeline` | The router program (Anchor) | BSL 1.1, becomes GPL-2.0-or-later on 2028-11-08 |
 | `programs/test-strategy-cp` | Example strategy: a constant-product pool. The starting point for your own | Apache-2.0 |
+| `programs/gacha-curve` | Example strategy: a bonding curve with an opt-in prize pot ([`docs/GACHA-CURVE.md`](docs/GACHA-CURVE.md)) | Apache-2.0 |
 | `programs/test-strategy-evil`, `test-hook`, `test-hook-refill` | Hostile strategy and transfer hooks used by the router's security tests | Apache-2.0 |
 | `crates/pipeline-strategy-interface` | The strategy interface: types, discriminators, account layouts, fee maths | Apache-2.0 |
 | `crates/pipeline-client` | Rust addresses, instruction builders and account decoders | Apache-2.0 |

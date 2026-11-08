@@ -1,7 +1,14 @@
 # On-chain programs, built with `cargo build-sbf` (4.4 or later, for sBPF v3).
 [workspace]
 resolver = "2"
-members = ["pipeline", "test-strategy-cp", "test-strategy-evil", "test-hook", "test-hook-refill"]
+members = [
+    "pipeline",
+    "test-strategy-cp",
+    "test-strategy-evil",
+    "test-hook",
+    "test-hook-refill",
+    "gacha-curve",
+]
 
 [profile.release]
 overflow-checks = true
