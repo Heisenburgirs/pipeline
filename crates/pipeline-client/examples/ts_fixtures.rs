@@ -162,6 +162,7 @@ fn discriminators() -> Value {
         "init_fee_account",
         "swap",
         "sweep_fees",
+        "lift_pause",
     ];
     let instructions: serde_json::Map<String, Value> = router_instructions
         .iter()
@@ -314,6 +315,7 @@ fn router_instructions() -> Value {
             &client::update_config(&key(1), &args),
         ));
     }
+    cases.push(instruction("liftPause", json!({}), &client::lift_pause()));
 
     let uri = "https://example.com/strategy.json";
     cases.push(instruction(
@@ -324,8 +326,9 @@ fn router_instructions() -> Value {
             "strategyProgram": addr(&key(7)),
             "listingFeeRecipient": addr(&key(2)),
             "metadataUri": uri,
+            "maxListingFeeLamports": "10000000",
         }),
-        &client::register_strategy(&key(1), &key(6), &key(7), &key(2), uri),
+        &client::register_strategy(&key(1), &key(6), &key(7), &key(2), uri, 10_000_000),
     ));
 
     cases.push(instruction(

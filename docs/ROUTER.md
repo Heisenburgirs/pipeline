@@ -75,8 +75,9 @@ See [`STRATEGY-GUIDE.md`](STRATEGY-GUIDE.md) section 9.
 | Instruction | Who | Effect |
 |---|---|---|
 | `initialize_config` | The router's upgrade authority, once | Creates `Config` |
-| `update_config` | `admin` | Admin, pause, listing fee (up to the cap), fee recipient, treasury owner |
-| `register_strategy(metadata_uri)` | The strategy program's upgrade authority, or the program itself signing with its PDA `["pipeline-register"]` | Pays the listing fee and creates `Strategy` |
+| `update_config` | `admin` | Admin, pause, listing fee (up to the cap), fee recipient, treasury owner. Pausing needs the router to still be upgradeable |
+| `lift_pause` | Anyone, once the router is frozen | Clears a pause left in place |
+| `register_strategy(metadata_uri, interface_version, max_listing_fee_lamports)` | The strategy program's upgrade authority, or the program itself signing with its PDA `["pipeline-register"]` | Pays the listing fee (failing if above the caller's maximum) and creates `Strategy` |
 | `update_metadata(uri)` | The same | Updates `metadata_uri` |
 | `create_market(init_data, max_creator_lamports)` | Anyone | Funds the `setup_payer` with up to `max_creator_lamports`, calls `pipeline_init_market` with it as payer (the creator's own signature is never passed on), checks the payer is still a plain system account, refunds what's left, then calls `pipeline_market_info` and records the `Market` |
 | `register_existing_market` | Anyone | Records a market the strategy created by itself |
@@ -86,7 +87,8 @@ See [`STRATEGY-GUIDE.md`](STRATEGY-GUIDE.md) section 9.
 
 When paused, `swap`, `create_market`, `register_existing_market` and `register_strategy`
 stop. Admin actions and `sweep_fees` keep working, and direct calls to strategies are
-unaffected.
+unaffected. The pause power ends when the router is frozen: a frozen router can't be
+paused, and anyone can clear a pause left in place.
 
 ## A swap, step by step
 
@@ -162,8 +164,11 @@ ones return what they know and are asked again, up to four rounds.
 - **Restrictive transfer hooks.** A token whose hook refuses transfers into the market's
   fee account can be bought through Pipeline but not sold.
 - **`create_market` passes on fresh signers.** An account that signs and is empty, unfunded
-  and system-owned keeps its signature, so a strategy can create it. A wallet with no SOL
-  looks the same, so sign `create_market` only with new keypairs.
+  and system-owned keeps its signature, so a strategy can create it (the creator's own key
+  never does). A wallet with no SOL looks the same, so sign `create_market` only with new
+  keypairs.
 - **Integrator fees have no cap.** The trader signs the rate; front-ends should show it.
 - **Loader-v4 programs** can't register yet; use the upgradeable loader (v3).
-- **Not audited.** A focused audit of the router comes before mainnet.
+- **Audit.** Reviewed with three internal adversarial rounds and a Stronghold of Security
+  audit (2026-11-08); every confirmed finding is fixed with a regression test. No external
+  audit.

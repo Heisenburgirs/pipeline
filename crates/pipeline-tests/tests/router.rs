@@ -68,6 +68,65 @@ fn only_admin_updates_config_and_fee_is_capped() {
     );
 }
 
+/// The pause power ends when the router is frozen. A frozen router can't be
+/// paused, and anyone can lift a pause left in place, so a lost admin key can't freeze
+/// every market for good.
+#[test]
+fn the_pause_power_ends_when_the_router_is_frozen() {
+    let mut env = Env::new();
+    let admin = env.admin.pubkey();
+    let pause = |paused| {
+        client::update_config(
+            &admin,
+            &client::UpdateConfigArgs {
+                paused: Some(paused),
+                ..Default::default()
+            },
+        )
+    };
+    // While upgradeable: the admin pauses, and `lift_pause` (which needs no signer) is
+    // refused.
+    env.send(&[pause(true)], &[]).expect("pause");
+    assert_fails_with(env.send(&[client::lift_pause()], &[]), "RouterNotFrozen");
+
+    // Frozen with the pause still on: anyone can lift it.
+    set_upgrade_authority(&mut env.svm, &client::PROGRAM_ID, None);
+    env.send(&[client::lift_pause()], &[])
+        .expect("lift the pause");
+    let config = client::decode_config(&env.account_data(&client::pda::config())).unwrap();
+    assert!(!config.paused);
+
+    // And the admin can no longer pause; other settings still work.
+    assert_fails_with(env.send(&[pause(true)], &[]), "FrozenRouterCannotPause");
+    env.send(&[pause(false)], &[])
+        .expect("unpausing is always allowed");
+}
+
+/// A registration names the most it will pay, so raising the listing fee can't surprise
+/// a registration already signed.
+#[test]
+fn registration_refuses_a_listing_fee_above_its_maximum() {
+    let mut env = Env::new();
+    let owner = env.funded_keypair();
+    env.deploy_strategy(&CP_PROGRAM_ID, "test_strategy_cp", &owner.pubkey());
+    let recipient = env.listing_fee_recipient;
+    let register = |max| {
+        client::register_strategy(
+            &owner.pubkey(),
+            &owner.pubkey(),
+            &CP_PROGRAM_ID,
+            &recipient,
+            "https://example.com/strategy.json",
+            max,
+        )
+    };
+    let ix = register(LISTING_FEE - 1);
+    assert_fails_with(env.send(&[ix], &[&owner]), "ListingFeeAboveMaximum");
+    let ix = register(LISTING_FEE);
+    env.send(&[ix], &[&owner])
+        .expect("register at the expected fee");
+}
+
 #[test]
 fn registration_requires_the_upgrade_authority_and_pays_the_listing_fee() {
     let mut env = Env::new();
@@ -81,6 +140,7 @@ fn registration_requires_the_upgrade_authority_and_pays_the_listing_fee() {
         &CP_PROGRAM_ID,
         &env.listing_fee_recipient,
         "uri",
+        u64::MAX,
     );
     assert_fails_with(env.send(&[ix], &[&impostor]), "NotStrategyOwner");
 
@@ -91,6 +151,7 @@ fn registration_requires_the_upgrade_authority_and_pays_the_listing_fee() {
         &CP_PROGRAM_ID,
         &env.listing_fee_recipient,
         "https://example.com/cp.json",
+        u64::MAX,
     );
     let meta = env.send(&[ix], &[&owner]).unwrap();
     assert_eq!(
@@ -112,6 +173,7 @@ fn registration_requires_the_upgrade_authority_and_pays_the_listing_fee() {
         &CP_PROGRAM_ID,
         &env.listing_fee_recipient,
         "x",
+        u64::MAX,
     );
     assert!(env.send(&[again], &[&owner]).is_err());
     let bad_update = client::update_metadata(&impostor.pubkey(), &CP_PROGRAM_ID, "evil");
@@ -139,6 +201,7 @@ fn immutable_strategy_cannot_be_registered_by_anyone_but_its_pda() {
         &CP_PROGRAM_ID,
         &env.listing_fee_recipient,
         "uri",
+        u64::MAX,
     );
     assert_fails_with(env.send(&[ix], &[&owner]), "NotStrategyOwner");
 }

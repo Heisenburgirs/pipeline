@@ -120,6 +120,7 @@ impl Env {
             program_id,
             &self.listing_fee_recipient,
             "https://example.com/strategy.json",
+            u64::MAX,
         );
         self.send(&[ix], &[&owner]).expect("register_strategy");
         owner

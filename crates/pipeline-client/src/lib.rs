@@ -248,19 +248,33 @@ pub fn update_config(admin: &Pubkey, args: &UpdateConfigArgs) -> Instruction {
     let mut accounts = vec![
         AccountMeta::new_readonly(*admin, true),
         AccountMeta::new(pda::config(), false),
+        AccountMeta::new_readonly(PROGRAM_ID, false),
+        AccountMeta::new_readonly(pda::program_data(&PROGRAM_ID), false),
     ];
     accounts.extend(event_cpi_accounts());
     Instruction::new_with_bytes(PROGRAM_ID, &anchor_data("update_config", args), accounts)
 }
 
+/// `lift_pause`: anyone can clear the pause once the router is frozen.
+pub fn lift_pause() -> Instruction {
+    let mut accounts = vec![
+        AccountMeta::new(pda::config(), false),
+        AccountMeta::new_readonly(PROGRAM_ID, false),
+        AccountMeta::new_readonly(pda::program_data(&PROGRAM_ID), false),
+    ];
+    accounts.extend(event_cpi_accounts());
+    Instruction::new_with_bytes(PROGRAM_ID, &anchor_data("lift_pause", &()), accounts)
+}
+
 /// `register_strategy`. `registrar` is the program's upgrade authority or its
-/// registration PDA.
+/// registration PDA. Fails if the listing fee is above `max_listing_fee_lamports`.
 pub fn register_strategy(
     payer: &Pubkey,
     registrar: &Pubkey,
     strategy_program: &Pubkey,
     listing_fee_recipient: &Pubkey,
     metadata_uri: &str,
+    max_listing_fee_lamports: u64,
 ) -> Instruction {
     let mut accounts = vec![
         AccountMeta::new(*payer, true),
@@ -277,7 +291,11 @@ pub fn register_strategy(
         PROGRAM_ID,
         &anchor_data(
             "register_strategy",
-            &(metadata_uri.to_string(), interface::INTERFACE_VERSION),
+            &(
+                metadata_uri.to_string(),
+                interface::INTERFACE_VERSION,
+                max_listing_fee_lamports,
+            ),
         ),
         accounts,
     )

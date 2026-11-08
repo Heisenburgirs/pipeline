@@ -78,6 +78,7 @@
       "create_market": "67e261ebc8bcfbfe",
       "init_fee_account": "55a9b9d367996f02",
       "initialize_config": "d07f1501c2bec446",
+      "lift_pause": "aaafcc2a57fcdd78",
       "register_existing_market": "65a037a696967b36",
       "register_strategy": "790c404b630fb18f",
       "swap": "f8c69e91e17587c8",
@@ -1058,6 +1059,16 @@
           "isWritable": true
         },
         {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3dpKiLEDnLxCDBybnc5N9iVSLDWpvVBhE4971w59JETL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
           "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
           "isSigner": false,
           "isWritable": false
@@ -1095,6 +1106,16 @@
           "isWritable": true
         },
         {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3dpKiLEDnLxCDBybnc5N9iVSLDWpvVBhE4971w59JETL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
           "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
           "isSigner": false,
           "isWritable": false
@@ -1117,6 +1138,39 @@
         }
       },
       "name": "updateConfig",
+      "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
+    },
+    {
+      "accounts": [
+        {
+          "address": "BmdeX3kWjQavcjggCd1YDws67szz7iqcJRa1KebtRQZ8",
+          "isSigner": false,
+          "isWritable": true
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "3dpKiLEDnLxCDBybnc5N9iVSLDWpvVBhE4971w59JETL",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "8Zp1XYra8KUSDj3CpS4FbnAPewCncTPPWtz9Aq4b7L2N",
+          "isSigner": false,
+          "isWritable": false
+        },
+        {
+          "address": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34",
+          "isSigner": false,
+          "isWritable": false
+        }
+      ],
+      "data": "aaafcc2a57fcdd78",
+      "inputs": {},
+      "name": "liftPause",
       "programAddress": "PiPEf4fFBpYXCtgfiWgVWzZNXnq2wZ7bnXidJCTwf34"
     },
     {
@@ -1172,9 +1226,10 @@
           "isWritable": false
         }
       ],
-      "data": "790c404b630fb18f2100000068747470733a2f2f6578616d706c652e636f6d2f73747261746567792e6a736f6e01",
+      "data": "790c404b630fb18f2100000068747470733a2f2f6578616d706c652e636f6d2f73747261746567792e6a736f6e018096980000000000",
       "inputs": {
         "listingFeeRecipient": "8qbHbw2BbbTHBW1sbeqakYXVKRQM8Ne7pLK7m6CVfeR",
+        "maxListingFeeLamports": "10000000",
         "metadataUri": "https://example.com/strategy.json",
         "payer": "4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi",
         "registrar": "QWmroo4YnnMqYW3cnxWkFdaTxGD3P7vMSzwMHGbUzwF",

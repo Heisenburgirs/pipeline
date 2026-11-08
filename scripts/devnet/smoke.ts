@@ -214,6 +214,7 @@ async function main() {
                 strategyProgram: CP_PROGRAM,
                 listingFeeRecipient: config.listingFeeRecipient,
                 metadataUri: 'https://example.com/pipeline/constant-product.json',
+                maxListingFeeLamports: config.listingFeeLamports,
             }),
         ]);
     }

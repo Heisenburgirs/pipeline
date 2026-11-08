@@ -52,7 +52,16 @@ pub mod pipeline {
     }
 
     /// Changes admin settings. Every field is optional.
+    ///
+    /// Pausing needs the router to still be upgradeable: once it is frozen, the pause
+    /// power ends, and `lift_pause` lets anyone clear a pause left in place.
     pub fn update_config(ctx: Context<UpdateConfig>, args: UpdateConfigArgs) -> Result<()> {
+        if args.paused == Some(true) {
+            require!(
+                ctx.accounts.router_data.upgrade_authority_address.is_some(),
+                PipelineError::FrozenRouterCannotPause
+            );
+        }
         let config = &mut ctx.accounts.config;
         if let Some(admin) = args.admin {
             config.admin = admin;
@@ -83,7 +92,27 @@ pub mod pipeline {
         Ok(())
     }
 
-    /// Registers a strategy program for the current listing fee.
+    /// Clears the pause once the router is frozen. Anyone can call it, so a pause can't
+    /// outlive the router's upgradeability even if the admin key is lost.
+    pub fn lift_pause(ctx: Context<LiftPause>) -> Result<()> {
+        require!(
+            ctx.accounts.router_data.upgrade_authority_address.is_none(),
+            PipelineError::RouterNotFrozen
+        );
+        let config = &mut ctx.accounts.config;
+        config.paused = false;
+        emit_cpi!(ConfigChanged {
+            admin: config.admin,
+            paused: config.paused,
+            listing_fee_lamports: config.listing_fee_lamports,
+            listing_fee_recipient: config.listing_fee_recipient,
+            treasury_owner: config.treasury_owner,
+        });
+        Ok(())
+    }
+
+    /// Registers a strategy program for the current listing fee, which must be at most
+    /// `max_listing_fee_lamports` (so a fee change can't surprise a pending registration).
     ///
     /// The registrar must be the program's upgrade authority, or the program's own
     /// `["pipeline-register"]` PDA (signing through a CPI) for programs that are or
@@ -92,9 +121,14 @@ pub mod pipeline {
         ctx: Context<RegisterStrategy>,
         metadata_uri: String,
         interface_version: u8,
+        max_listing_fee_lamports: u64,
     ) -> Result<()> {
         let config = &ctx.accounts.config;
         require!(!config.paused, PipelineError::Paused);
+        require!(
+            config.listing_fee_lamports <= max_listing_fee_lamports,
+            PipelineError::ListingFeeAboveMaximum
+        );
         require!(
             interface_version == psi::INTERFACE_VERSION,
             PipelineError::UnsupportedInterfaceVersion
@@ -197,6 +231,15 @@ pub mod pipeline {
         let setup_payer = ctx.accounts.setup_payer.to_account_info();
         let system_program = ctx.accounts.system_program.to_account_info();
 
+        // Decide which accounts keep their signature before the creator pays anything: a
+        // creator emptied by the payment below would otherwise look fresh. The creator's
+        // own signature is never passed on.
+        let creator = ctx.accounts.creator.key();
+        let keeps_signature = |account: &AccountInfo| *account.key != creator && is_fresh(account);
+        let market_state_signs = keeps_signature(&ctx.accounts.market_state.to_account_info());
+        let remaining_sign: Vec<bool> =
+            ctx.remaining_accounts.iter().map(keeps_signature).collect();
+
         if max_creator_lamports > 0 {
             invoke(
                 &anchor_lang::solana_program::system_instruction::transfer(
@@ -216,7 +259,7 @@ pub mod pipeline {
             AccountMeta::new_readonly(market_key, true),
             meta_like(
                 &ctx.accounts.market_state.to_account_info(),
-                is_fresh(&ctx.accounts.market_state),
+                market_state_signs,
             ),
             AccountMeta::new(setup_payer.key(), true),
             AccountMeta::new_readonly(system_program::ID, false),
@@ -227,8 +270,8 @@ pub mod pipeline {
             setup_payer.clone(),
             system_program.clone(),
         ];
-        for account in ctx.remaining_accounts {
-            metas.push(meta_like(account, is_fresh(account)));
+        for (account, signs) in ctx.remaining_accounts.iter().zip(remaining_sign) {
+            metas.push(meta_like(account, signs));
             infos.push(account.clone());
         }
         infos.push(ctx.accounts.strategy_program.to_account_info());
@@ -927,6 +970,23 @@ pub struct UpdateConfig<'info> {
     pub admin: Signer<'info>,
     #[account(mut, seeds = [seeds::CONFIG], bump = config.bump, has_one = admin @ PipelineError::NotAdmin)]
     pub config: Account<'info, Config>,
+    /// The router itself and its ProgramData, to tell whether it is still upgradeable.
+    /// (`#[event_cpi]` already adds a `program` field.)
+    #[account(constraint = router.programdata_address()? == Some(router_data.key()))]
+    pub router: Program<'info, crate::program::Pipeline>,
+    pub router_data: Account<'info, ProgramData>,
+}
+
+#[event_cpi]
+#[derive(Accounts)]
+pub struct LiftPause<'info> {
+    #[account(mut, seeds = [seeds::CONFIG], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    /// The router itself and its ProgramData, to tell whether it is still upgradeable.
+    /// (`#[event_cpi]` already adds a `program` field.)
+    #[account(constraint = router.programdata_address()? == Some(router_data.key()))]
+    pub router: Program<'info, crate::program::Pipeline>,
+    pub router_data: Account<'info, ProgramData>,
 }
 
 #[event_cpi]
@@ -1229,4 +1289,10 @@ pub enum PipelineError {
     SetupPayerMisused,
     #[msg("Arithmetic overflow")]
     MathOverflow,
+    #[msg("The router is frozen, so it can no longer be paused")]
+    FrozenRouterCannotPause,
+    #[msg("Only a frozen router's pause can be lifted by anyone")]
+    RouterNotFrozen,
+    #[msg("The listing fee is above the maximum the registration accepts")]
+    ListingFeeAboveMaximum,
 }

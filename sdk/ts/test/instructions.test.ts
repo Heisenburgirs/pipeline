@@ -12,6 +12,7 @@ import {
     swap,
     sweepFees,
     updateConfig,
+    liftPause,
     updateMetadata,
     type MarketView,
     type PipelineInstruction,
@@ -52,6 +53,8 @@ function build(fixture: FixtureInstruction): Promise<PipelineInstruction> {
                     treasuryOwner: optionalAddress(i.args.treasuryOwner),
                 },
             });
+        case 'liftPause':
+            return liftPause();
         case 'registerStrategy':
             return registerStrategy({
                 payer: address(i.payer),
@@ -59,6 +62,7 @@ function build(fixture: FixtureInstruction): Promise<PipelineInstruction> {
                 strategyProgram: address(i.strategyProgram),
                 listingFeeRecipient: address(i.listingFeeRecipient),
                 metadataUri: i.metadataUri,
+                maxListingFeeLamports: BigInt(i.maxListingFeeLamports),
             });
         case 'updateMetadata':
             return updateMetadata({
@@ -135,7 +139,7 @@ function build(fixture: FixtureInstruction): Promise<PipelineInstruction> {
 
 describe('router instruction builders match Rust', () => {
     it('cover every builder', () => {
-        expect(new Set(fixtures.instructions.map((f) => f.name)).size).toBe(9);
+        expect(new Set(fixtures.instructions.map((f) => f.name)).size).toBe(10);
     });
 
     for (const [n, fixture] of fixtures.instructions.entries()) {

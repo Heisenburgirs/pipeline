@@ -383,6 +383,7 @@ fn immutable_strategy_registers_through_its_own_pda() {
         &EVIL_ID,
         &env.listing_fee_recipient,
         "uri",
+        u64::MAX,
     );
     let mut accounts = vec![AccountMeta::new_readonly(client::PROGRAM_ID, false)];
     accounts.extend(inner.accounts.iter().map(|meta| AccountMeta {

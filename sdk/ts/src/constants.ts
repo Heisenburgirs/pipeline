@@ -70,6 +70,7 @@ export const ROUTER_INSTRUCTION_DISCRIMINATORS = {
     initFeeAccount: new Uint8Array([85, 169, 185, 211, 103, 153, 111, 2]),
     swap: new Uint8Array([248, 198, 158, 145, 225, 117, 135, 200]),
     sweepFees: new Uint8Array([175, 225, 98, 71, 118, 66, 34, 148]),
+    liftPause: new Uint8Array([170, 175, 204, 42, 87, 252, 221, 120]),
 } as const;
 
 /** Router account discriminators: `sha256("account:<Name>")[..8]`. */

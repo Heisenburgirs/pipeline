@@ -95,19 +95,39 @@ export async function initializeConfig(input: { admin: Address; args: ConfigArgs
 
 export async function updateConfig(input: { admin: Address; args: UpdateConfigArgs }): Promise<PipelineInstruction> {
     return routerInstruction(
-        [readonlySigner(input.admin), writable(await configPda()), ...(await eventCpiAccounts())],
+        [
+            readonlySigner(input.admin),
+            writable(await configPda()),
+            readonly(PIPELINE_PROGRAM_ADDRESS),
+            readonly(await programDataPda(PIPELINE_PROGRAM_ADDRESS)),
+            ...(await eventCpiAccounts()),
+        ],
         instructionData(DISCRIMINATORS.updateConfig, getUpdateConfigArgsCodec(), input.args),
+    );
+}
+
+/** `lift_pause`: anyone can clear the pause once the router is frozen. */
+export async function liftPause(): Promise<PipelineInstruction> {
+    return routerInstruction(
+        [
+            writable(await configPda()),
+            readonly(PIPELINE_PROGRAM_ADDRESS),
+            readonly(await programDataPda(PIPELINE_PROGRAM_ADDRESS)),
+            ...(await eventCpiAccounts()),
+        ],
+        discriminatorOnly(DISCRIMINATORS.liftPause),
     );
 }
 
 const registerStrategyArgsCodec = getStructCodec([
     ['metadataUri', getBorshStringCodec()],
     ['interfaceVersion', getU8Codec()],
+    ['maxListingFeeLamports', getU64Codec()],
 ]);
 
 /**
  * `register_strategy`. `registrar` is the program's upgrade authority or its registration
- * PDA ({@link registerPda}).
+ * PDA ({@link registerPda}). Fails if the listing fee is above `maxListingFeeLamports`.
  */
 export async function registerStrategy(input: {
     payer: Address;
@@ -115,6 +135,7 @@ export async function registerStrategy(input: {
     strategyProgram: Address;
     listingFeeRecipient: Address;
     metadataUri: string;
+    maxListingFeeLamports: bigint;
 }): Promise<PipelineInstruction> {
     return routerInstruction(
         [
@@ -131,6 +152,7 @@ export async function registerStrategy(input: {
         instructionData(DISCRIMINATORS.registerStrategy, registerStrategyArgsCodec, {
             metadataUri: input.metadataUri,
             interfaceVersion: INTERFACE_VERSION,
+            maxListingFeeLamports: input.maxListingFeeLamports,
         }),
     );
 }

@@ -16,8 +16,9 @@ chart sites integrate Pipeline once and see every new market without per-market 
   signs for the strategy, never pays more than their input plus the stated fees, and gets
   at least their minimum output or the swap fails.
 
-> **Status: live on devnet.** Not audited and not on mainnet yet. Interfaces may still
-> change, and package names are placeholders.
+> **Status: live on devnet.** Not on mainnet yet. Security-reviewed internally (three
+> adversarial rounds and a Stronghold of Security audit), not externally audited.
+> Interfaces may still change, and package names are placeholders.
 
 ## Live on devnet
 
