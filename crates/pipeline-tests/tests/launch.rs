@@ -18,16 +18,14 @@ const LAUNCH_PROGRAM_ID: Pubkey = client::pubkey!("4scUVyL9JbLjvkppBk8PYNGRPMCQf
 const USD: u64 = 1_000_000;
 /// One billion tokens with 6 decimals.
 const SUPPLY: u64 = 1_000_000_000 * USD;
-/// pump.fun's shape: 793.1 million tokens sell on the curve and 206.9 million are held
-/// back for the pool. pump.fun prices against 1.073 billion virtual tokens that include
-/// the real ones; this strategy adds the virtual part to the real one, so the virtual
-/// part is the 279.9 million left when the curve sells out.
-const CURVE_SUPPLY: u64 = 793_100_000 * USD;
+/// The default preset from docs/LAUNCH-CURVE.md: a $100k start, a $1B graduation
+/// (10,000x, so `r = 0.01`), and the held-back tokens worth exactly the raise at the
+/// final $1.00 price. `curve_supply = supply / 1.01`, `virtual_token = curve_supply / 99`,
+/// `virtual_quote = virtual_token / 100`.
+const CURVE_SUPPLY: u64 = 990_099_009_900_990;
 const RESERVED: u64 = SUPPLY - CURVE_SUPPLY;
-const VIRTUAL_TOKEN: u64 = 279_900_000 * USD;
-/// The virtual quote reserve that puts the curve's final price at $1.00, so the token
-/// graduates at a $1B market cap: `virtual_token² / (virtual_token + curve_supply)`.
-const VIRTUAL_QUOTE: u64 = 73_013_988_816_403;
+const VIRTUAL_TOKEN: u64 = 10_001_000_100_010;
+const VIRTUAL_QUOTE: u64 = 100_010_001_000;
 const POOL_FEE_BPS: u16 = 30;
 
 /// Mirrors the strategy's `InitParams`.
@@ -410,9 +408,9 @@ fn curve_trades_follow_the_curve_and_match_quotes() {
     let m = setup(&mut env);
     let t = trader(&mut env, &m, 1_000_000 * USD);
 
-    // The opening price is virtual_quote / (virtual_token + curve_supply) ≈ $0.068, a
-    // $68M market cap.
-    let amount = 1_000 * USD;
+    // The opening price is virtual_quote / (virtual_token + curve_supply) = $0.0001, a
+    // $100k market cap. A $10 buy barely moves it.
+    let amount = 10 * USD;
     let got = buy(&mut env, &m, &t, amount);
     let opening_price = VIRTUAL_QUOTE as f64 / (VIRTUAL_TOKEN + CURVE_SUPPLY) as f64;
     let paid_per_token = amount as f64 / got as f64;
@@ -455,18 +453,18 @@ fn curve_trades_follow_the_curve_and_match_quotes() {
 fn the_buy_that_sells_out_the_curve_graduates_it_into_the_pool() {
     let mut env = Env::new();
     let m = setup(&mut env);
-    let t = trader(&mut env, &m, 300_000_000 * USD);
+    let t = trader(&mut env, &m, 20_000_000 * USD);
 
-    // Most of the curve goes in one buy; it does not graduate.
-    buy(&mut env, &m, &t, 150_000_000 * USD);
+    // Half the raise goes in one buy; it does not graduate.
+    buy(&mut env, &m, &t, 5_000_000 * USD);
     let (graduated, quote_reserve, left, _) = state(&env, &m);
     assert!(!graduated && left > 0);
 
     // The buy that takes the rest: it pays exactly for the remaining curve tokens and
-    // spends the remaining $1M on the new pool.
+    // spends the remaining $100k on the new pool.
     let (x, y) = curve_xy(quote_reserve, left);
     let cost = cost_for(x, y, left);
-    let extra = 1_000_000 * USD;
+    let extra = 100_000 * USD;
     let raise = quote_reserve + cost;
     let pool_leg = pool_out(raise, RESERVED, extra);
     assert!(pool_leg > 0);
@@ -494,12 +492,9 @@ fn the_buy_that_sells_out_the_curve_graduates_it_into_the_pool() {
     // The strategy logs its Graduated event.
     assert!(meta.logs.iter().any(|l| l.starts_with("Program data:")));
 
-    // The raise is pump.fun's share of the graduation market cap: about 20.7% of $1B.
+    // A 10,000x curve raises r / (1 + r) = 1/101 of the graduation market cap: $9.9M.
     let raise_usd = raise as f64 / USD as f64;
-    assert!(
-        (raise_usd / 206_886_011.0 - 1.0).abs() < 1e-4,
-        "{raise_usd}"
-    );
+    assert!((raise_usd / 9_900_990.0 - 1.0).abs() < 1e-4, "{raise_usd}");
     // The curve's final price is $1.00 (a $1B market cap on 1B tokens), and the pool
     // opens at that same price because the held-back tokens are worth the raise.
     let final_price = (x + cost as u128) as f64 / (y - left as u128) as f64;
@@ -515,7 +510,7 @@ fn the_buy_that_sells_out_the_curve_graduates_it_into_the_pool() {
 fn a_buy_for_exactly_the_remaining_cost_graduates_with_no_pool_leg() {
     let mut env = Env::new();
     let m = setup(&mut env);
-    let t = trader(&mut env, &m, 300_000_000 * USD);
+    let t = trader(&mut env, &m, 20_000_000 * USD);
 
     let (x, y) = curve_xy(0, CURVE_SUPPLY);
     let cost = cost_for(x, y, CURVE_SUPPLY);
@@ -537,20 +532,21 @@ fn a_buy_for_exactly_the_remaining_cost_graduates_with_no_pool_leg() {
 fn after_graduation_trades_follow_the_pool_and_never_return_to_the_curve() {
     let mut env = Env::new();
     let m = setup(&mut env);
-    let whale = trader(&mut env, &m, 300_000_000 * USD);
+    let whale = trader(&mut env, &m, 20_000_000 * USD);
     let (x, y) = curve_xy(0, CURVE_SUPPLY);
     buy(&mut env, &m, &whale, cost_for(x, y, CURVE_SUPPLY));
     let (_, pool_quote, pool_token, _) = state(&env, &m);
     assert!(state(&env, &m).0);
 
     // A pool buy: constant product on real reserves, 0.3% fee kept by the pool.
-    let t = trader(&mut env, &m, 10_000_000 * USD);
-    let amount = 1_000_000 * USD;
+    let t = trader(&mut env, &m, 1_000_000 * USD);
+    let amount = 10_000 * USD;
     let got = buy(&mut env, &m, &t, amount);
     assert_eq!(got, pool_out(pool_quote, pool_token, amount));
-    // Just over $1 per token, since the pool opened at parity.
+    // Just over $1 per token, since the pool opened at parity: 0.3% fee plus ~0.1% of
+    // impact on a $9.9M pool.
     let paid = amount as f64 / got as f64;
-    assert!(paid > 1.0 && paid < 1.02, "{paid}");
+    assert!(paid > 1.0 && paid < 1.01, "{paid}");
     assert_eq!(reserves(&env, &m), (pool_quote + amount, pool_token - got));
 
     // Selling nearly everything back (Pipeline takes its fee on a sell in the token, so

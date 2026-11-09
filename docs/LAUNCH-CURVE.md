@@ -77,24 +77,36 @@ quote against `virtual_token` tokens, so:
 - **pool opening price** = raise / (`supply − curve_supply`)
 
 Pick the parameters so the pool opening price equals the final price, or the price jumps
-at graduation. The pump.fun ratios do this almost exactly. Scaled to a one-billion-token
-supply, a USDC quote and a $1B graduation:
+at graduation. On this curve one number fixes everything else: the multiple `M` by which
+the price rises between the first and the last curve token. With `r = 1 / √M` and a final
+price `p` (quote base units per token base unit):
 
-| Parameter | Value | Why |
-|---|---|---|
-| `supply` | 1,000,000,000 tokens | |
-| `curve_supply` | 793,100,000 tokens | pump.fun sells 793.1M of 1B on the curve |
-| `virtual_token` | 279,900,000 tokens | pump.fun prices against 1,073,000,000 virtual tokens that include the real ones; 279.9M is what is left when the 793.1M real ones are gone |
-| `virtual_quote` | $73,013,988.82 | `virtual_token² / (virtual_token + curve_supply)`, which puts the final price at $1.00 |
+- `curve_supply = supply / (1 + r)`, which holds back `r × curve_supply` tokens;
+- `virtual_token = r × curve_supply / (1 − r)`;
+- `virtual_quote = r × virtual_token × p`.
 
-That curve opens at $0.068 per token (a $68M market cap), ends at $1.00 (a $1B market
-cap) and raises **$206.9M**, 20.7% of the graduation market cap. The 206.9M held-back
-tokens are worth $206.9M at $1.00, so the pool opens at $0.99993, within 0.01% of where
-the curve ended. These are the same proportions as pump.fun itself: 30 SOL virtual, 85
-SOL raised, 411 SOL market cap at graduation.
+The curve then raises `r / (1 + r)` of the graduation market cap, and the held-back tokens
+are worth exactly that raise at the final price, so the pool opens at parity.
 
-The tests in `crates/pipeline-tests/tests/launch.rs` run exactly these numbers through the
-router and check the raise, the final price and the pool's opening price.
+`M` is a trade-off between how low the token starts and how much liquidity backs it at
+graduation; you cannot pick both. pump.fun's own curve rises 14.7x and raises 20.7% of its
+graduation market cap, but that depth only exists at its $69k graduation. Its tokens that
+went on to reach $1B had on the order of 1 to 2% of their market cap in their main pool
+by then, so a curve that bonds at $1B should lock about that much. Presets for a
+one-billion-token supply, a USDC quote and a $1.00 final price (a $1B graduation):
+
+| Start market cap | `M` | `curve_supply` (tokens) | `virtual_token` (tokens) | `virtual_quote` | Raised and locked at graduation |
+|---|---|---|---|---|---|
+| **$100k** (default) | 10,000x | 990,099,009.900990 | 10,001,000.100010 | $100,010.001 | $9.90M, 0.99% |
+| $417k | 2,400x | 979,995,909.267370 | 20,420,931.416388 | $416,840.684 | $20.00M, 2.0% |
+| $68M (pump.fun's shape) | 14.7x | 793,100,000 | 279,900,000 | $73,013,988.82 | $206.9M, 20.7% |
+
+In base units with 6 decimals on both sides, the default is `curve_supply =
+990_099_009_900_990`, `virtual_token = 10_001_000_100_010` and `virtual_quote =
+100_010_001_000`. The start market cap is also the token's floor: the curve's reserves
+cannot go below zero, so it never prices below its opening price. The tests in
+`crates/pipeline-tests/tests/launch.rs` run the default through the router and check the
+raise, the final price and the pool's opening price.
 
 ## Account resolution
 
@@ -117,8 +129,8 @@ as usual. Nothing about a trade's accounts depends on whether the market has gra
 | | Address |
 |---|---|
 | Program | [`4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA`](https://orbmarkets.io/address/4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA/history?cluster=devnet) |
-| Demo market (the $1B parameters above, against a 6-decimal test quote) | [`FVhBg763W9oaBkrtFTCuVWH9t7HnT5RYTtuAifeLz29o`](https://orbmarkets.io/address/FVhBg763W9oaBkrtFTCuVWH9t7HnT5RYTtuAifeLz29o/history?cluster=devnet) |
-| Demo token | `9UsyWNUhCNctTRYjToNzHrLdKCFFovDDdGMLJG5AeLGA` |
+| Demo market (the default preset above, against a 6-decimal test quote) | [`CpA1g1zdf2JXC9mxqqdc48nJg63Z8FYdsqZQvLpiaLdS`](https://orbmarkets.io/address/CpA1g1zdf2JXC9mxqqdc48nJg63Z8FYdsqZQvLpiaLdS/history?cluster=devnet) |
+| Demo token | `G1WDvVUudx95ccfRTjT9rGL4BDTZa85oG3Rq7hCoimed` |
 
 The program is registered with the router. `scripts/devnet/strategies.ts` is what registered
 it and created the demo market; run it with `ONLY=launch` against any cluster where

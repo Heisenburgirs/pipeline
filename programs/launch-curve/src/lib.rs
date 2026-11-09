@@ -15,11 +15,13 @@
 //!    withdrawn.
 //!
 //! Choose the parameters so that the held-back tokens are worth the raise at the
-//! curve's final price, and the pool opens at the price the curve ended at. The
-//! pump.fun ratios do this: the curve ends with `virtual_quote + raise` against exactly
-//! `virtual_token`, so the final price is their ratio, and the raise is about 20.7% of
-//! the graduation market cap. With USDC as quote and the supply at 1 billion tokens, a
-//! $1B graduation raises about $207M.
+//! curve's final price, and the pool opens at the price the curve ended at. One number
+//! fixes the rest: the price multiple `M` between the first and last curve token. With
+//! `r = 1 / √M`, sell `supply / (1 + r)` on the curve, set `virtual_token` to
+//! `r × curve_supply / (1 − r)` and `virtual_quote` to `r × virtual_token × final price`.
+//! The curve then raises `r / (1 + r)` of the graduation market cap. The default preset
+//! in the docs starts at $100k, graduates at $1B and locks $9.9M as liquidity; pump.fun's
+//! own 14.7x shape would lock 20.7%, far more than its tokens ever had at $1B.
 //!
 //! A buy that crosses the graduation point pays exactly for the remaining curve tokens
 //! and spends the rest of its input on the new pool in the same trade, so pricing is

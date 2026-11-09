@@ -55,14 +55,15 @@ const GACHA_PROGRAM = address('2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G');
 const SYSTEM_PROGRAM = address('11111111111111111111111111111111');
 const SLOT_HASHES = address('SysvarS1otHashes111111111111111111111111111');
 
-// Launch curve: pump.fun's ratios scaled to a 1B supply, a 6-decimal quote and a $1.00
-// final price (a $1B graduation). See docs/LAUNCH-CURVE.md.
+// Launch curve: the default preset from docs/LAUNCH-CURVE.md. A 1B supply against a
+// 6-decimal quote, starting at a $100k market cap and graduating at $1B (a $1.00 final
+// price) with $9.9M raised and locked as the pool.
 const USD = 1_000_000n;
 const LAUNCH = {
     supply: 1_000_000_000n * USD,
-    curveSupply: 793_100_000n * USD,
-    virtualQuote: 73_013_988_816_403n,
-    virtualToken: 279_900_000n * USD,
+    curveSupply: 990_099_009_900_990n,
+    virtualQuote: 100_010_001_000n,
+    virtualToken: 10_001_000_100_010n,
     poolFeeBps: 30,
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 2% fee, 1-in-20 for a 40% bonus
@@ -321,8 +322,8 @@ async function launchDemo(wallet: KeyPairSigner) {
     ]);
     log(`launch-curve market ${marketAddress}: token ${tokenMint.address}, quote ${quoteMint}, launch ${launch}`);
 
-    // Buy $1,000 on the fresh curve: about 14,700 tokens at the $0.068 opening price.
-    const amount = 1_000n * USD;
+    // Buy $100 on the fresh curve: about 1M tokens at the $0.0001 opening price.
+    const amount = 100n * USD;
     const { quote, received, signature } = await quoteAndSwap(
         wallet, LAUNCH_PROGRAM, launch, [quoteMint, tokenMint.address], [quoteVault, tokenVault], true, amount, new Uint8Array(),
     );
