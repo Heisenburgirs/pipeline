@@ -111,3 +111,15 @@ as usual. Nothing about a trade's accounts depends on whether the market has gra
   deadline that refunds or graduates early is a natural extension.
 - The pool fee accrues to the pool itself. Routing it to a creator or a treasury is a
   small change to `apply` plus an account.
+
+## On devnet
+
+| | Address |
+|---|---|
+| Program | [`4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA`](https://orbmarkets.io/address/4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA/history?cluster=devnet) |
+| Demo market (the $1B parameters above, against a 6-decimal test quote) | [`FVhBg763W9oaBkrtFTCuVWH9t7HnT5RYTtuAifeLz29o`](https://orbmarkets.io/address/FVhBg763W9oaBkrtFTCuVWH9t7HnT5RYTtuAifeLz29o/history?cluster=devnet) |
+| Demo token | `9UsyWNUhCNctTRYjToNzHrLdKCFFovDDdGMLJG5AeLGA` |
+
+The program is registered with the router. `scripts/devnet/strategies.ts` is what registered
+it and created the demo market; run it with `ONLY=launch` against any cluster where
+Pipeline is set up to create your own.
