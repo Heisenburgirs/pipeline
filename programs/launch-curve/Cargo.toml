@@ -1,0 +1,26 @@
+[package]
+name = "launch-curve"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Bonding-curve strategy for Pipeline that graduates into a constant-product pool once the curve sells out at a target market cap"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "launch_curve"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+custom-heap = []
+custom-panic = []
+anchor-debug = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang = "=1.2.2"
+anchor-spl = "=1.2.2"
+pipeline-strategy-interface = { path = "../../crates/pipeline-strategy-interface" }
