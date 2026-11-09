@@ -16,8 +16,9 @@ chart sites integrate Pipeline once and see every new market without per-market 
   signs for the strategy, never pays more than their input plus the stated fees, and gets
   at least their minimum output or the swap fails.
 
-> **Status: live on devnet.** Not on mainnet yet. Security-reviewed internally (three
-> adversarial rounds and a Stronghold of Security audit), not externally audited.
+> **Status: live on devnet.** Not on mainnet yet. The router's maths is formally verified
+> ([`docs/VERIFICATION.md`](docs/VERIFICATION.md)) and it has been security-audited
+> ([`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md)); there is no external audit.
 > Interfaces may still change, and package names are placeholders.
 
 ## Live on devnet
@@ -38,6 +39,7 @@ devnet in a few minutes.
 | Build your own AMM or market | [`docs/QUICKSTART.md`](docs/QUICKSTART.md), then [`docs/STRATEGY-GUIDE.md`](docs/STRATEGY-GUIDE.md) |
 | Build a desk, terminal, bot or chart on top | [`docs/INTEGRATOR-GUIDE.md`](docs/INTEGRATOR-GUIDE.md) |
 | Understand the router | [`docs/ROUTER.md`](docs/ROUTER.md) |
+| See how it's verified and audited | [`docs/VERIFICATION.md`](docs/VERIFICATION.md), [`docs/SECURITY-AUDIT.md`](docs/SECURITY-AUDIT.md) |
 
 ## Repository
 

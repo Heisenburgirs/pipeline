@@ -55,17 +55,29 @@ fn only_admin_updates_config_and_fee_is_capped() {
     );
     assert_fails_with(env.send(&[too_high], &[]), "ListingFeeTooHigh");
 
-    let ok = client::update_config(
+    // A non-zero fee below the rent-exempt minimum would make registrations to an
+    // unfunded recipient fail, so it's refused; 0 is fine.
+    let dust = client::update_config(
         &admin,
         &client::UpdateConfigArgs {
             listing_fee_lamports: Some(5),
             ..Default::default()
         },
     );
-    let meta = env.send(&[ok], &[]).unwrap();
-    assert!(
-        matches!(events(&meta)[..], [PipelineEvent::ConfigChanged(ref c)] if c.listing_fee_lamports == 5)
-    );
+    assert_fails_with(env.send(&[dust], &[]), "ListingFeeBelowRent");
+    for fee in [0, 1_000_000] {
+        let ok = client::update_config(
+            &admin,
+            &client::UpdateConfigArgs {
+                listing_fee_lamports: Some(fee),
+                ..Default::default()
+            },
+        );
+        let meta = env.send(&[ok], &[]).unwrap();
+        assert!(
+            matches!(events(&meta)[..], [PipelineEvent::ConfigChanged(ref c)] if c.listing_fee_lamports == fee)
+        );
+    }
 }
 
 /// The pause power ends when the router is frozen. A frozen router can't be
@@ -652,4 +664,98 @@ fn strategy_upgrade_does_not_stop_routing() {
     );
     env.send(&[client::swap(&accounts, &exact_in(1_000, 0))], &[&trader])
         .unwrap();
+}
+
+/// A swap that moves nothing either way is refused rather than recorded as an empty
+/// trade.
+#[test]
+fn a_swap_that_moves_nothing_is_refused() {
+    let mut env = Env::new();
+    let market = setup_cp_market(&mut env, TOKEN, TOKEN, 1_000_000_000, 2_000_000_000, 30);
+    let (trader, trader_a) = env.trader_with(&market.mint_a, &TOKEN, 10_000_000);
+    let trader_b = env.create_ata(&trader.pubkey(), &market.mint_b, &TOKEN);
+    let accounts = cp_swap_accounts(
+        &market,
+        &trader.pubkey(),
+        &market.mint_a,
+        &trader_a,
+        &market.mint_b,
+        &trader_b,
+    );
+    let ix = client::swap(&accounts, &exact_in(0, 0));
+    assert_fails_with(env.send(&[ix], &[&trader]), "NothingSwapped");
+}
+
+/// Pipeline's fee account, or the integrator's, can't be the trader's input account: a
+/// "fee" paid to the account it came from would be recorded but never collected.
+#[test]
+fn fee_accounts_cannot_be_the_traders_input() {
+    let mut env = Env::new();
+    let market = setup_cp_market(&mut env, TOKEN, TOKEN, 1_000_000_000, 2_000_000_000, 30);
+    let (trader, trader_a) = env.trader_with(&market.mint_a, &TOKEN, 10_000_000);
+    let trader_b = env.create_ata(&trader.pubkey(), &market.mint_b, &TOKEN);
+    let mut accounts = cp_swap_accounts(
+        &market,
+        &trader.pubkey(),
+        &market.mint_a,
+        &trader_a,
+        &market.mint_b,
+        &trader_b,
+    );
+    // Integrator account = the trader's input account.
+    accounts.integrator_fee_account = Some(trader_a);
+    let mut args = exact_in(1_000_000, 0);
+    args.integrator_fee_bps = 10;
+    let ix = client::swap(&accounts, &args);
+    assert_fails_with(env.send(&[ix], &[&trader]), "FeeToTraderInput");
+
+    // Trader input = this market's fee account for the input mint.
+    let fee_account = pda::fee_account(&market.market, &market.mint_a, &TOKEN);
+    let mut accounts = cp_swap_accounts(
+        &market,
+        &trader.pubkey(),
+        &market.mint_a,
+        &fee_account,
+        &market.mint_b,
+        &trader_b,
+    );
+    accounts.integrator_fee_account = None;
+    let ix = client::swap(&accounts, &exact_in(1_000_000, 0));
+    assert_fails_with(env.send(&[ix], &[&trader]), "FeeToTraderInput");
+}
+
+/// An SPL multisig account (355 bytes) can't pass as a token account, even with byte 165
+/// set to Token-2022's "account" type.
+#[test]
+fn a_multisig_account_is_not_a_token_account() {
+    let mut env = Env::new();
+    let market = setup_cp_market(&mut env, TOKEN, TOKEN, 1_000_000_000, 2_000_000_000, 30);
+    let (trader, trader_a) = env.trader_with(&market.mint_a, &TOKEN, 10_000_000);
+    let fake_output = Pubkey::new_unique();
+    let mut data = vec![0u8; 355];
+    data[..32].copy_from_slice(market.mint_b.as_ref());
+    data[32..64].copy_from_slice(trader.pubkey().as_ref());
+    data[165] = 2;
+    env.svm
+        .set_account(
+            fake_output,
+            solana_account::Account {
+                lamports: 10_000_000,
+                data,
+                owner: TOKEN,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let accounts = cp_swap_accounts(
+        &market,
+        &trader.pubkey(),
+        &market.mint_a,
+        &trader_a,
+        &market.mint_b,
+        &fake_output,
+    );
+    let ix = client::swap(&accounts, &exact_in(1_000_000, 0));
+    assert_fails_with(env.send(&[ix], &[&trader]), "BadTokenAccount");
 }

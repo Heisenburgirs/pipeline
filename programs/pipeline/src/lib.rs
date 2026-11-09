@@ -10,7 +10,8 @@
 //! - the trader's token accounts as writable but never the trader's signature, so it
 //!   can pay the trader but cannot take more from them.
 //!
-//! Fee accounts belong to a separate per-market PDA that is never passed to strategies.
+//! Fee accounts belong to a separate per-market PDA that never signs during a swap or
+//! market setup; it signs only sweeps to the treasury.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -18,7 +19,7 @@ use anchor_lang::solana_program::program::{
     get_return_data, invoke, invoke_signed, set_return_data,
 };
 use anchor_lang::solana_program::{bpf_loader_upgradeable, system_program};
-use pipeline_strategy_interface::{self as psi, fees, seeds, TradeMode};
+use pipeline_strategy_interface::{self as psi, seeds, TradeMode};
 use token::associated_token_address;
 
 mod token;
@@ -37,10 +38,7 @@ pub mod pipeline {
     /// Creates the global config. Only the router's upgrade authority can call this,
     /// so nobody can claim the config first after deployment.
     pub fn initialize_config(ctx: Context<InitializeConfig>, args: ConfigArgs) -> Result<()> {
-        require!(
-            args.listing_fee_lamports <= MAX_LISTING_FEE_LAMPORTS,
-            PipelineError::ListingFeeTooHigh
-        );
+        check_listing_fee(args.listing_fee_lamports)?;
         let config = &mut ctx.accounts.config;
         config.admin = ctx.accounts.admin.key();
         config.paused = false;
@@ -70,10 +68,7 @@ pub mod pipeline {
             config.paused = paused;
         }
         if let Some(fee) = args.listing_fee_lamports {
-            require!(
-                fee <= MAX_LISTING_FEE_LAMPORTS,
-                PipelineError::ListingFeeTooHigh
-            );
+            check_listing_fee(fee)?;
             config.listing_fee_lamports = fee;
         }
         if let Some(recipient) = args.listing_fee_recipient {
@@ -208,8 +203,10 @@ pub mod pipeline {
     /// They keep their signer flag only if they are fresh (empty, system-owned, no
     /// lamports), as a new keypair account the strategy is meant to create would be.
     /// The router can't tell such an account from a wallet that holds no SOL but owns
-    /// token accounts or holds authorities, so callers must only sign with new keypairs
-    /// here: the strategy can use a fresh signer's signature however it likes.
+    /// token accounts or holds authorities (including one emptied earlier in the same
+    /// transaction), or from a program's PDA signing through a CPI. So callers must only
+    /// sign with new keypairs here: the strategy can use a fresh signer's signature
+    /// however it likes.
     pub fn create_market<'info>(
         ctx: Context<'info, CreateMarket<'info>>,
         init_data: Vec<u8>,
@@ -432,14 +429,25 @@ pub mod pipeline {
             args.integrator_fee_bps == 0 || accounts.integrator_fee_account.is_some(),
             PipelineError::MissingIntegratorFeeAccount
         );
+        // Fees must leave the trader's input account. Paying a fee "to" that same
+        // account would record a fee in the event that was never collected.
+        require_keys_neq!(
+            accounts.fee_account.key(),
+            accounts.trader_input.key(),
+            PipelineError::FeeToTraderInput
+        );
+        if let Some(integrator_account) = &accounts.integrator_fee_account {
+            require_keys_neq!(
+                integrator_account.key(),
+                accounts.trader_input.key(),
+                PipelineError::FeeToTraderInput
+            );
+        }
 
         let remaining = ctx.remaining_accounts;
-        let hook_count = args.input_hook_accounts as usize;
-        require!(
-            hook_count <= remaining.len(),
-            PipelineError::BadHookAccounts
-        );
-        let hook_accounts = &remaining[remaining.len() - hook_count..];
+        let hook_start = psi::settlement::hook_split(remaining.len(), args.input_hook_accounts)
+            .ok_or(PipelineError::BadHookAccounts)?;
+        let hook_accounts = &remaining[hook_start..];
 
         let trader_input = accounts.trader_input.to_account_info();
         let trader_output = accounts.trader_output.to_account_info();
@@ -490,36 +498,45 @@ pub mod pipeline {
         };
         call_strategy_swap(accounts, remaining, &request)?;
 
-        let input_after = token::balance(&trader_input)?;
-        let output_after = token::balance(&trader_output)?;
-        let vault_after = token::balance(&input_vault)?;
-        let trader_spent = input_before.saturating_sub(input_after);
-        let received = output_after.saturating_sub(output_before);
-        require!(
-            received >= args.min_amount_out,
-            PipelineError::InsufficientOutput
-        );
-        // The trader never parts with more input than they sent, even if a token
-        // extension (such as a permanent delegate) lets the strategy pull more.
-        require!(
-            trader_spent <= args.amount_in,
-            PipelineError::SpendLimitExceeded
-        );
-        // The swap is charged on the trader's net spend, or on what the market's input
-        // vault kept if that is more. Other code runs during the strategy call (such as
-        // the output mint's transfer hook), and it could top up the trader's input
-        // account to make the spend look smaller; the vault is the market's own. With
-        // a transfer-fee input the vault keeps less than the trader spent, and the
-        // trader's spend counts. Never more than `amount_in`.
-        let vault_kept = vault_after.saturating_sub(vault_before);
-        let net_sent = trader_spent.max(vault_kept).min(args.amount_in);
-        // Output for no input is not a swap; it would also record a meaningless price.
-        require!(
-            net_sent > 0 || received == 0,
-            PipelineError::OutputWithoutInput
-        );
+        // Re-check the accounts after the call: the strategy can't have swapped them for
+        // something else, but a closed or reassigned account must not be read as a
+        // token account.
+        let measured = psi::settlement::Measured {
+            input_before,
+            input_after: token::checked_balance(
+                &trader_input,
+                &input_mint,
+                &accounts.input_token_program.key(),
+            )?,
+            output_before,
+            output_after: token::checked_balance(
+                &trader_output,
+                &output_mint,
+                &accounts.output_token_program.key(),
+            )?,
+            vault_before,
+            vault_after: token::checked_balance(
+                &input_vault,
+                &input_mint,
+                &accounts.input_token_program.key(),
+            )?,
+        };
+        // The fee base is the trader's net spend, or what the market's input vault kept
+        // if that is more (other code, such as the output mint's transfer hook, could top
+        // up the trader's input account during the call), at most `amount_in`. See
+        // `pipeline_strategy_interface::settlement`.
+        let settlement = psi::settlement::settle(
+            &measured,
+            args.amount_in,
+            args.min_amount_out,
+            args.integrator_fee_bps,
+        )
+        .map_err(settle_error)?;
+        let net_sent = settlement.net_sent;
+        let received = settlement.received;
+        let pipeline_fee = settlement.pipeline_fee;
+        let integrator_fee = settlement.integrator_fee;
 
-        let pipeline_fee = fees::pipeline_fee(net_sent);
         if pipeline_fee > 0 {
             token::transfer_checked(
                 &accounts.input_token_program.to_account_info(),
@@ -534,8 +551,6 @@ pub mod pipeline {
             )?;
         }
 
-        let integrator_fee = fees::ceil_bps(net_sent, args.integrator_fee_bps as u64)
-            .ok_or(PipelineError::MathOverflow)?;
         let integrator = accounts.integrator_fee_account.as_ref().map(|a| a.key());
         if integrator_fee > 0 {
             let integrator_account = accounts
@@ -693,6 +708,33 @@ fn call_strategy_swap<'info>(
         &[signer_seeds],
     )?;
     Ok(())
+}
+
+/// A listing fee is at most the compiled cap, and either 0 or at least the rent-exempt
+/// minimum for an empty account: a smaller payment to an unfunded recipient would fail,
+/// and with it every registration.
+fn check_listing_fee(fee: u64) -> Result<()> {
+    require!(
+        fee <= MAX_LISTING_FEE_LAMPORTS,
+        PipelineError::ListingFeeTooHigh
+    );
+    require!(
+        fee == 0 || fee >= Rent::get()?.minimum_balance(0),
+        PipelineError::ListingFeeBelowRent
+    );
+    Ok(())
+}
+
+/// The router's error for each reason [`psi::settlement::settle`] refuses a swap.
+fn settle_error(error: psi::settlement::SettleError) -> Error {
+    use psi::settlement::SettleError;
+    match error {
+        SettleError::InsufficientOutput => PipelineError::InsufficientOutput.into(),
+        SettleError::SpendLimitExceeded => PipelineError::SpendLimitExceeded.into(),
+        SettleError::OutputWithoutInput => PipelineError::OutputWithoutInput.into(),
+        SettleError::NothingSwapped => PipelineError::NothingSwapped.into(),
+        SettleError::MathOverflow => PipelineError::MathOverflow.into(),
+    }
 }
 
 /// Calls the strategy's read-only `pipeline_market_info` and decodes its return data.
@@ -1295,4 +1337,10 @@ pub enum PipelineError {
     RouterNotFrozen,
     #[msg("The listing fee is above the maximum the registration accepts")]
     ListingFeeAboveMaximum,
+    #[msg("A fee account can't be the trader's input account")]
+    FeeToTraderInput,
+    #[msg("Nothing was sent and nothing received")]
+    NothingSwapped,
+    #[msg("A non-zero listing fee must be at least the rent-exempt minimum")]
+    ListingFeeBelowRent,
 }

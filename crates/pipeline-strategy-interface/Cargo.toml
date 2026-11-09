@@ -9,4 +9,8 @@ description = "Wire types, discriminators and fee maths for Pipeline strategy pr
 borsh = { version = "1.5", features = ["derive"] }
 
 [dev-dependencies]
+proptest = "1"
 sha2 = "0.10"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)', 'cfg(kani_full)'] }

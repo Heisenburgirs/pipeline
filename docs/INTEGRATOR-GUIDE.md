@@ -60,7 +60,7 @@ Arguments:
 
 **What the trader pays:** the router charges `ceil(net_sent × 0.25%)` plus your fee on top of the input actually kept by the strategy. The most a swap can cost is `pipeline_strategy_interface::fees::max_total_spend(amount_in, integrator_fee_bps)`. To spend at most a budget, use `fees::amount_for_budget`.
 
-**Multi-hop:** put several `swap` instructions in one transaction. Each hop pays 0.25%. Size each later hop from the previous hop's output with `amount_for_budget`, and put the trader's end-to-end minimum on the last hop.
+**Multi-hop:** put several `swap` instructions in one transaction. Each hop pays 0.25%. **Give every hop its own `min_amount_out`** (its quote minus your slippage), and **size each later hop from the previous hop's minimum**, not its quote: `amount_in = amount_for_budget(previous min_amount_out, bps)`. Put the trader's end-to-end minimum on the last hop. A later hop spends its `amount_in` from the trader's account whatever the earlier hop delivered, so sizing it from the guaranteed minimum means it can never dip into intermediate tokens the trader already held, even if an earlier hop is sandwiched.
 
 **Before the first swap that sells a mint in a market,** that market's fee account for the mint must exist. Add `init_fee_account` (idempotent) to the transaction if needed.
 
@@ -74,6 +74,8 @@ Every swap emits one `SwapEvent` as a router self-CPI, so it is not lost to log 
 - **Fields:** market, strategy, trader, input and output mints, mode, `net_sent` (input the swap was charged for, excluding fees), `received` (output that arrived), `pipeline_fee`, the integrator account and fee, slot and timestamp.
 - **Price** is `received / net_sent` in the mints' units. Adjust for decimals; Token-2022 transfer fees are already reflected in both numbers.
 - **Volume** is `net_sent` in the input mint.
+- **`integrator`** is whatever account the trader passed. A non-zero `integrator_fee` means that amount was transferred to it; the field alone proves nothing about who built the trade.
+- **When the numbers can differ from what moved:** `net_sent` is what the swap is charged for: the trader's net spend, or what the market's input vault kept if that is more (at most `amount_in`). `received` is what arrived in the trader's output account, so an input mint's transfer hook that tops up that account during the swap inflates it. Both are measured on-chain and can't be faked by the strategy, but a token issuer's hook can move them; treat prices from tokens with hooks accordingly.
 
 The same decoder handles `MarketCreated`, `StrategyRegistered`, `MetadataUpdated`, `FeesSwept` and `ConfigChanged`. Trades made by calling a strategy directly, bypassing Pipeline, do not produce Pipeline events.
 
@@ -92,10 +94,12 @@ Pipeline does not vet strategies.
 ## 6. Limits worth knowing
 
 - **Restrictive transfer hooks.** A mint whose hook rejects transfers into the market's fee account cannot be sold through Pipeline, though it can be bought.
+- **Transfer-fee input tokens.** Pipeline's fee transfer and later sweeps pay the token's transfer fee like any transfer, so the issuer collects a cut of Pipeline's fee in that token. This is the issuer's power over its own token.
 - **Frozen fee accounts.** Mints whose accounts start frozen (Token-2022 DefaultAccountState), or whose freeze authority freezes a market's fee account, cannot be sold through that market.
 - **CPI Guard.** Traders with Token-2022 CPI Guard enabled on their input account cannot swap through the router, because it moves their tokens in a cross-program call.
-- **Permanent delegates.** A mint's permanent delegate can move Pipeline's collected fees in that mint, so they should be swept often. Traders are protected: the router never lets a swap take more than `amount_in`.
-- **Creating markets.** A strategy's setup never receives the creator's signature. It spends from a router payer funded with `max_creator_lamports` (unused SOL is returned), so set that to the rent you expect.
+- **Permanent delegates.** A mint's permanent delegate can move Pipeline's collected fees in that mint, so they should be swept often. Traders are protected: the router never lets a swap take more than `amount_in` plus the two fees.
+- **Creating markets.** A strategy's setup never receives the creator's signature. It spends from a router payer funded with `max_creator_lamports` (unused SOL is returned), so set that to the rent you expect. Any other account that signs and is empty, unfunded and system-owned keeps its signature for the strategy (so it can create it); a wallet with no SOL, including one emptied earlier in the same transaction, or a program's PDA signing through a CPI, looks the same. Sign `create_market` only with new keypairs.
 - **Exact-out with transfer-fee input tokens.** Unused input refunded by the strategy pays the token's transfer fee again, and Pipeline's fee is measured on the trader's real loss. Keep `amount_in` close to the quote for such tokens.
 - **Call depth.** Calls nest at most 4 levels. A trader using a smart wallet, combined with a hooked token and a strategy that calls another protocol, can exceed it.
 - **Compute.** A typical swap costs 40–55k compute units in total. Strategies vary.
+- **Heap with many hook accounts.** With the default 32 KiB heap, a swap handles about 28 transfer-hook accounts; beyond that the router runs out of memory and the whole transaction reverts (nothing moves). Add a ComputeBudget `RequestHeapFrame` instruction (up to 256 KiB) for swaps with very long hook account lists. Plain strategy accounts hit Solana's 64-account limit first.

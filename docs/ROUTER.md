@@ -11,8 +11,8 @@ hold their own liquidity; the router never custodies it.
 |---|---|---|
 | `Config` | `["config"]` | `admin`, `paused`, `listing_fee_lamports` (at most `MAX_LISTING_FEE_LAMPORTS`), `listing_fee_recipient`, `treasury_owner` (owner of the treasury token accounts that receive swept fees) |
 | `Strategy` | `["strategy", program_id]` | `program_id`, `metadata_uri` (up to 200 bytes), `interface_version`, `registered_at`, `market_count` |
-| `Market` | `["market", program_id, market_state]` | `strategy_program`, `market_state` (an account the strategy owns), `mints` (2–4), `vaults` (where input in each mint goes), `supports_exact_out`, `created_by`, `created_at`. The market PDA also **signs every router call into its strategy**, so a strategy can check a call came from Pipeline for that exact market |
-| `fee_authority` | `["fees", market]` | No data. Owns the market's fee accounts. **Never passed to strategies**, so the market signer a strategy receives can't move fees |
+| `Market` | `["market", program_id, market_state]` | `strategy_program`, `market_state` (an account the strategy owns), `mints` (2–4), `vaults` (where input in each mint goes), `supports_exact_out`, `created_by`, `created_at`. The market PDA also **signs the router's calls that set up or trade the market** (`pipeline_init_market`, `pipeline_swap`; the read-only `pipeline_market_info` isn't signed), so a strategy can check a call came from Pipeline for that exact market |
+| `fee_authority` | `["fees", market]` | No data. Owns the market's fee accounts. **Never signs during a swap or market setup** (a trader may list it, unsigned, among the strategy's accounts; it signs only sweeps to the treasury), so nothing a strategy receives can move fees |
 | `setup_payer` | `["setup", market]` | No data. Holds the creator's `max_creator_lamports` while a strategy sets up a market, and is emptied again in the same instruction |
 | Fee accounts | Associated token account of the market's `fee_authority`, one per mint | The 0.25% fees collected in that mint. Created by `init_fee_account` (anyone can pay) |
 
@@ -75,7 +75,7 @@ See [`STRATEGY-GUIDE.md`](STRATEGY-GUIDE.md) section 9.
 | Instruction | Who | Effect |
 |---|---|---|
 | `initialize_config` | The router's upgrade authority, once | Creates `Config` |
-| `update_config` | `admin` | Admin, pause, listing fee (up to the cap), fee recipient, treasury owner. Pausing needs the router to still be upgradeable |
+| `update_config` | `admin` | Admin, pause, listing fee (0, or between the rent-exempt minimum and the cap), fee recipient, treasury owner. Pausing needs the router to still be upgradeable |
 | `lift_pause` | Anyone, once the router is frozen | Clears a pause left in place |
 | `register_strategy(metadata_uri, interface_version, max_listing_fee_lamports)` | The strategy program's upgrade authority, or the program itself signing with its PDA `["pipeline-register"]` | Pays the listing fee (failing if above the caller's maximum) and creates `Strategy` |
 | `update_metadata(uri)` | The same | Updates `metadata_uri` |
@@ -93,7 +93,7 @@ paused, and anyone can clear a pause left in place.
 ## A swap, step by step
 
 1. **Check.** Not paused; the market and strategy match; both mints belong to the market;
-   exact-out only if the market supports it.
+   exact-out only if the market supports it; neither fee account is the trader's input.
 2. **Snapshot** the trader's input and output balances and the market's input vault.
 3. **Send input** with `transfer_checked`, signed by the trader: `amount_in` (exact-in) or
    the maximum input (exact-out).
@@ -108,17 +108,23 @@ paused, and anyone can clear a pause left in place.
      transfer-fee token the vault keeps less than the trader spent, and the trader's spend
      counts.
    - `received` = the trader's output balance after minus before.
-   - Require `received ≥ min_amount_out`, `trader_spent ≤ amount_in`, and some input if
-     there is any output.
+   - Require `received ≥ min_amount_out`, `trader_spent ≤ amount_in`, and `net_sent > 0`
+     (no output for no input, and no empty swaps).
+   - This step is `pipeline_strategy_interface::settlement::settle`, a pure function, so
+     quoters can share it and its guarantees can be proven for every input.
 6. **Charge fees** from the trader: `ceil(net_sent × 0.25%)` into the market's fee account,
    plus an optional integrator fee at a rate the trader signs.
 7. **Publish** a `SwapEvent` (via `emit_cpi!`, so log truncation can't lose it) and return
    `SwapResult { net_sent, received, pipeline_fee, integrator_fee }`.
 
 The most a swap can cost is known before signing:
-`amount_in + ceil(amount_in × (25 + integrator bps) / 10,000)`. Multi-hop routes are
-several `swap` instructions in one transaction; each hop pays 0.25%, and the last carries
-the trader's end-to-end minimum.
+`amount_in + ceil(amount_in × 25 / 10,000) + ceil(amount_in × integrator bps / 10,000)`
+(`fees::max_total_spend`; each fee rounds up on its own). Multi-hop routes are
+several `swap` instructions in one transaction; each hop pays 0.25%. Give every hop its own
+minimum (its quote less slippage), size each later hop from the previous hop's minimum
+rather than its quote, and put the trader's end-to-end minimum on the last. A later hop
+spends its `amount_in` from the trader's account whatever the earlier hop delivered, so
+this way it can never dip into intermediate tokens the trader already held.
 
 ## Events
 
@@ -165,10 +171,11 @@ ones return what they know and are asked again, up to four rounds.
   fee account can be bought through Pipeline but not sold.
 - **`create_market` passes on fresh signers.** An account that signs and is empty, unfunded
   and system-owned keeps its signature, so a strategy can create it (the creator's own key
-  never does). A wallet with no SOL looks the same, so sign `create_market` only with new
-  keypairs.
+  never does). A wallet with no SOL looks the same, including one emptied earlier in the
+  same transaction, and so does a program's PDA signing through a CPI. Sign
+  `create_market` only with new keypairs, and don't pass a program's own PDAs as signers.
 - **Integrator fees have no cap.** The trader signs the rate; front-ends should show it.
 - **Loader-v4 programs** can't register yet; use the upgradeable loader (v3).
-- **Audit.** Reviewed with three internal adversarial rounds and a Stronghold of Security
-  audit (2026-11-08); every confirmed finding is fixed with a regression test. No external
-  audit.
+- **Audit.** Formally verified ([`VERIFICATION.md`](VERIFICATION.md)) and audited with
+  Stronghold of Security ([`SECURITY-AUDIT.md`](SECURITY-AUDIT.md)), after three internal
+  adversarial rounds. No external audit.

@@ -18,13 +18,13 @@ Implement five instructions. Each instruction's data is an 8-byte discriminator 
 
 ### Fixed accounts
 
-`pipeline_init_market` receives these accounts first, then whatever accounts the creator's transaction passes. The creator's own signature never reaches your program. Other accounts keep their signature only if they are fresh (empty, unfunded), such as a new keypair account you are meant to create. The router can't tell a new keypair from a wallet with no SOL, so anyone creating a market should sign only with new keypairs:
+`pipeline_init_market` receives these accounts first, then whatever accounts the creator's transaction passes. The creator's own signature never reaches your program. Other accounts keep their signature only if they are fresh (empty, unfunded), such as a new keypair account you are meant to create. The router can't tell a new keypair from a wallet with no SOL (including one emptied earlier in the same transaction) or a program's PDA signing through a CPI, so anyone creating a market should sign only with new keypairs:
 
 | Index | Account |
 |---|---|
 | 0 | Market signer: the router's market PDA (signer) |
 | 1 | Market state (writable; your program creates it) |
-| 2 | Payer (signer, writable): a router PDA holding at most the creator's `max_creator_lamports`. Pay rent from it; don't reassign or allocate it, or the router fails the transaction |
+| 2 | Payer (signer, writable): a router PDA funded with the creator's `max_creator_lamports` (plus anything a third party sent it, which also goes back to the creator). Pay rent from it; don't reassign or allocate it, or the router fails the transaction |
 | 3 | System program |
 
 `pipeline_market_info` receives the market state first.
@@ -55,7 +55,7 @@ Strategy amounts are measured at your vaults:
 
 Clients convert to the trader's view.
 
-- **Exact-in:** `trade.amount` is the input you receive, and you report or send the output.
+- **Exact-in:** `trade.amount` is what the router sent (`amount_in`, before any transfer fee), the same as `amount_sent`. With a transfer-fee token less arrives, so measure your vault (`credited_input`) and price what actually arrived.
 - **Exact-out** (only if `supports_exact_out`): `trade.amount` is the output you must send. You report the input you need and refund the rest.
 
 ## 2. Rules
@@ -73,6 +73,7 @@ The router does not enforce these, but quoting and trading depend on them.
    - Create vaults idempotently (`init_if_needed`), because anyone can create an associated token account in advance.
    - If market setup has parameters, include them in the market state's address, so a market with bad parameters can't occupy the address of a good one. The reference strategy keys pools by mints and fee tier.
 9. **Refuse to price an empty side.** A pool with zero reserves on either side should fail quotes and swaps, and its first deposit should need both tokens, as the reference strategy does.
+10. **Keep a swap's input in the input vault you declared** until the swap ends. The router charges its fee on the larger of what the trader spent and what that vault kept; moving input out of it during the call (combined with something refunding the trader) can only shrink your own market's fee base, and integrators can't see where the input went.
 
 ## 3. What your strategy cannot do in a Pipeline swap
 
@@ -100,6 +101,13 @@ Anything that isn't a swap, such as adding liquidity, claims or keeper jobs, is 
 2. **Register** it with the router's `register_strategy`, signed by the program's upgrade authority. This pays the one-time listing fee (0.01 SOL on devnet). An immutable program registers by signing through a CPI with its own `["pipeline-register"]` PDA (see `forward_to_router` in the hostile test strategy). Upgrades are free; your registration persists.
 3. **Create markets.** Anyone calls `create_market` with your setup data and accounts; the router calls your `pipeline_init_market` and `pipeline_market_info`. The creator sets `max_creator_lamports`: the router lends exactly that much to your setup through the payer account, and returns whatever you don't spend. Setup cannot touch the creator's wallet or token accounts. To seed liquidity from the creator, use a separate custom action they sign directly. Then call `init_fee_account` once per mint, in the same transaction if you like. A market your program creates by itself, outside `create_market`, can be recorded with `register_existing_market`.
 4. Point your registration at a **metadata JSON file** (`update_metadata` changes it).
+
+Things worth knowing:
+
+- **A fresh signer can be pre-funded.** If someone sends lamports to a new keypair account before the creator's `create_market` lands, it is no longer fresh, the router drops its signature, and setup fails. The creator can retry with another keypair; a market state at a PDA you derive avoids this.
+- **The `["pipeline-register"]` PDA is your program's registration authority.** If your program exposes an instruction that signs with it for anyone, anyone can register your program (paying the fee) or change its metadata. Only sign with it deliberately.
+- **The router doesn't tell you who created a market.** If a market's address comes only from public seeds (mints, fee tier), whoever creates it first gets it. Put the creator in the seeds if that matters.
+- **Anyone can register any account your program owns** with `register_existing_market`, so `pipeline_market_info` must check that the account is really one of your markets (rule 4).
 
 ## 7. Metadata JSON (version 1)
 

@@ -168,6 +168,8 @@ pub struct TradeRequest {
     /// Index into the market's mints.
     pub input_index: u8,
     pub output_index: u8,
+    /// Exact-in: what the router sends into the input vault (`amount_in`, before any
+    /// Token-2022 transfer fee, so less may arrive). Exact-out: the output to deliver.
     pub amount: u64,
     /// `None` for anonymous quotes, such as an aggregator's.
     pub trader: Option<[u8; 32]>,
@@ -261,12 +263,22 @@ pub fn credited_input(vault_balance: u64, recorded_reserve: u64, amount_sent: u6
 pub mod fees {
     use super::{BPS_DENOMINATOR, PIPELINE_FEE_BPS};
 
-    /// `ceil(amount × bps / 10,000)`, or `None` on overflow (only possible for `bps`
-    /// far above 100%).
+    /// `ceil(amount × bps / 10,000)`, or `None` if that doesn't fit in a u64 (only
+    /// possible above 100%).
+    ///
+    /// Computed in 64 bits, exactly. With `amount = q × D + r` and `bps = bq × D + br`
+    /// (`D` = 10,000), `amount × bps / D = q × bps + r × bq + r × br / D`, and the first
+    /// two terms are whole, so the ceiling only applies to `r × br / D`, where
+    /// `r × br < D²` always fits. Each term is at most the true result, so a term or sum
+    /// overflows exactly when the result doesn't fit. Avoiding 128-bit division keeps
+    /// this provable with Kani for every input.
     pub fn ceil_bps(amount: u64, bps: u64) -> Option<u64> {
-        let numerator = (amount as u128) * (bps as u128);
-        let fee = numerator.div_ceil(BPS_DENOMINATOR as u128);
-        u64::try_from(fee).ok()
+        let (q, r) = (amount / BPS_DENOMINATOR, amount % BPS_DENOMINATOR);
+        let (bq, br) = (bps / BPS_DENOMINATOR, bps % BPS_DENOMINATOR);
+        let whole = q.checked_mul(bps)?;
+        let middle = r.checked_mul(bq)?;
+        let rest = (r * br).div_ceil(BPS_DENOMINATOR);
+        whole.checked_add(middle)?.checked_add(rest)
     }
 
     /// Pipeline's fee on the input a trader actually parted with.
@@ -297,6 +309,105 @@ pub mod fees {
         amount
     }
 }
+
+/// What a router swap moved and what it is charged, computed from the balances the
+/// router measured around the strategy call. The router uses this, so quoters and SDKs
+/// can share its exact definition of `net_sent`.
+pub mod settlement {
+    use super::fees;
+
+    /// Token balances measured before and after the strategy call.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Measured {
+        /// The trader's input account.
+        pub input_before: u64,
+        pub input_after: u64,
+        /// The trader's output account.
+        pub output_before: u64,
+        pub output_after: u64,
+        /// The market's input vault (measured before the router's own transfer into it).
+        pub vault_before: u64,
+        pub vault_after: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Settlement {
+        /// What the trader's input account lost.
+        pub trader_spent: u64,
+        /// What arrived in the trader's output account.
+        pub received: u64,
+        /// What the market's input vault gained.
+        pub vault_kept: u64,
+        /// The input the swap is charged for: `min(amount_in, max(trader_spent,
+        /// vault_kept))`. Code other than the strategy (a transfer hook, for one) can top
+        /// up the trader's input account during the call; the vault is the market's own.
+        pub net_sent: u64,
+        pub pipeline_fee: u64,
+        pub integrator_fee: u64,
+    }
+
+    /// Why a swap is refused, in the order the checks run.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SettleError {
+        /// Less than `min_amount_out` arrived.
+        InsufficientOutput,
+        /// The trader lost more than `amount_in` before fees (for example through a
+        /// permanent delegate).
+        SpendLimitExceeded,
+        /// Output arrived but no input was kept.
+        OutputWithoutInput,
+        /// Nothing was sent and nothing received.
+        NothingSwapped,
+        /// The integrator fee doesn't fit in a u64 (only possible above 100%).
+        MathOverflow,
+    }
+
+    pub fn settle(
+        measured: &Measured,
+        amount_in: u64,
+        min_amount_out: u64,
+        integrator_fee_bps: u16,
+    ) -> Result<Settlement, SettleError> {
+        let trader_spent = measured.input_before.saturating_sub(measured.input_after);
+        let received = measured.output_after.saturating_sub(measured.output_before);
+        let vault_kept = measured.vault_after.saturating_sub(measured.vault_before);
+        if received < min_amount_out {
+            return Err(SettleError::InsufficientOutput);
+        }
+        if trader_spent > amount_in {
+            return Err(SettleError::SpendLimitExceeded);
+        }
+        let net_sent = trader_spent.max(vault_kept).min(amount_in);
+        if net_sent == 0 {
+            return Err(if received > 0 {
+                SettleError::OutputWithoutInput
+            } else {
+                SettleError::NothingSwapped
+            });
+        }
+        let pipeline_fee = fees::pipeline_fee(net_sent);
+        let integrator_fee =
+            fees::ceil_bps(net_sent, integrator_fee_bps as u64).ok_or(SettleError::MathOverflow)?;
+        Ok(Settlement {
+            trader_spent,
+            received,
+            vault_kept,
+            net_sent,
+            pipeline_fee,
+            integrator_fee,
+        })
+    }
+
+    /// Where the input mint's `hook_count` transfer-hook accounts start in a swap's
+    /// remaining accounts (they are the last ones), or `None` if there are fewer.
+    pub fn hook_split(remaining_len: usize, hook_count: u8) -> Option<usize> {
+        remaining_len.checked_sub(hook_count as usize)
+    }
+}
+
+/// Book of Knowledge Kani proofs (`cargo kani -p pipeline-strategy-interface`).
+#[cfg(kani)]
+mod bok_kani;
 
 #[cfg(test)]
 mod tests {
@@ -388,6 +499,100 @@ mod tests {
                     assert!(next > budget, "budget {budget} bps {bps} not maximal");
                 }
             }
+        }
+    }
+
+    fn measured(spent: u64, received: u64, kept: u64) -> settlement::Measured {
+        settlement::Measured {
+            input_before: 1_000_000,
+            input_after: 1_000_000 - spent,
+            output_before: 5,
+            output_after: 5 + received,
+            vault_before: 7,
+            vault_after: 7 + kept,
+        }
+    }
+
+    #[test]
+    fn settle_charges_the_larger_of_spend_and_vault_gain_up_to_amount_in() {
+        use settlement::settle;
+        // Honest swap: spend = what the vault kept.
+        let s = settle(&measured(1_000, 990, 1_000), 1_000, 0, 0).unwrap();
+        assert_eq!((s.net_sent, s.pipeline_fee, s.received), (1_000, 3, 990));
+        // A hook refilled the trader's input: the vault's gain is charged.
+        let s = settle(&measured(1, 990, 1_000), 1_000, 0, 0).unwrap();
+        assert_eq!(s.net_sent, 1_000);
+        // Transfer-fee input: the vault kept less; the trader's spend is charged.
+        let s = settle(&measured(1_000, 990, 990), 1_000, 0, 0).unwrap();
+        assert_eq!(s.net_sent, 1_000);
+        // Never more than amount_in, whatever the vault gained.
+        let s = settle(&measured(1_000, 990, 5_000), 1_000, 0, 50).unwrap();
+        assert_eq!((s.net_sent, s.integrator_fee), (1_000, 5));
+    }
+
+    #[test]
+    fn settle_refuses_in_a_fixed_order() {
+        use settlement::{settle, SettleError::*};
+        assert_eq!(
+            settle(&measured(1_000, 9, 1_000), 1_000, 10, 0),
+            Err(InsufficientOutput)
+        );
+        assert_eq!(
+            settle(&measured(1_001, 9, 1_001), 1_000, 0, 0),
+            Err(SpendLimitExceeded)
+        );
+        assert_eq!(
+            settle(&measured(0, 9, 0), 1_000, 0, 0),
+            Err(OutputWithoutInput)
+        );
+        assert_eq!(settle(&measured(0, 0, 0), 1_000, 0, 0), Err(NothingSwapped));
+        assert_eq!(
+            settle(&measured(10, 1, 10), u64::MAX, 0, u16::MAX).map(|s| s.integrator_fee),
+            Ok(66)
+        );
+    }
+
+    #[test]
+    fn hook_split_takes_the_trailing_accounts() {
+        use settlement::hook_split;
+        assert_eq!(hook_split(5, 2), Some(3));
+        assert_eq!(hook_split(2, 2), Some(0));
+        assert_eq!(hook_split(1, 2), None);
+    }
+
+    /// The 64-bit `ceil_bps` equals the 128-bit definition, including where it overflows.
+    #[test]
+    fn ceil_bps_matches_the_128_bit_definition() {
+        let reference = |a: u64, b: u64| {
+            u64::try_from((a as u128 * b as u128).div_ceil(BPS_DENOMINATOR as u128)).ok()
+        };
+        let edges = [
+            0,
+            1,
+            9_999,
+            10_000,
+            10_001,
+            65_535,
+            u32::MAX as u64,
+            u64::MAX / 10_000,
+            u64::MAX / 10_000 + 1,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for &a in &edges {
+            for &b in &edges {
+                assert_eq!(fees::ceil_bps(a, b), reference(a, b), "{a} × {b}");
+            }
+        }
+        // A cheap deterministic sweep over mixed magnitudes.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..200_000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let a = x >> (x % 64);
+            let b = x.rotate_left(17) >> ((x >> 8) % 64);
+            assert_eq!(fees::ceil_bps(a, b), reference(a, b), "{a} × {b}");
         }
     }
 }

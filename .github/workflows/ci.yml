@@ -57,6 +57,38 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  verification:
+    # Formal proofs of the router's maths: Z3 for the fee arithmetic over every 64-bit
+    # input, Kani for the settlement logic and everything else that finishes. The 34
+    # full-domain Kani proofs that time out are behind `--cfg kani_full`.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Z3 proofs of the fee maths
+        run: |
+          python -m venv /tmp/z3
+          /tmp/z3/bin/pip install --quiet z3-solver
+          /tmp/z3/bin/python crates/pipeline-strategy-interface/proofs/fee_maths_z3.py
+      - name: Cache Kani
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-kani
+            ~/.cargo/bin/kani
+            ~/.kani
+          key: ${{ runner.os }}-kani-0.67.0
+      - name: Install Kani
+        run: |
+          if ! cargo kani --version 2>/dev/null | grep -q "0.67.0"; then
+            cargo install --locked kani-verifier --version 0.67.0
+          fi
+          cargo kani setup
+      - name: Kani proofs
+        run: cargo kani -p pipeline-strategy-interface -Z unstable-options -Z stubbing -j 4 --output-format=terse
+
   typescript-sdk:
     runs-on: ubuntu-24.04
     defaults:

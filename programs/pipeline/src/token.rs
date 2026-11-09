@@ -65,6 +65,9 @@ pub fn create_associated_token_account_idempotent<'info>(
 
 /// Base token account layout: mint (0..32), owner (32..64), amount (64..72).
 const ACCOUNT_LEN: usize = 165;
+/// SPL multisig accounts are 355 bytes. Token-2022 never sizes a token account to this
+/// length, so an account of it is a multisig, whatever its byte 165 says.
+const MULTISIG_LEN: usize = 355;
 /// Token-2022 `AccountType::Account`.
 const ACCOUNT_TYPE_ACCOUNT: u8 = 2;
 /// Base mint layout: decimals at byte 44.
@@ -84,7 +87,10 @@ pub fn checked_balance(
         PipelineError::BadTokenAccount
     );
     let data = account.try_borrow_data()?;
-    require!(data.len() >= ACCOUNT_LEN, PipelineError::BadTokenAccount);
+    require!(
+        data.len() >= ACCOUNT_LEN && data.len() != MULTISIG_LEN,
+        PipelineError::BadTokenAccount
+    );
     // Token-2022 accounts with extensions carry an account-type byte after the base
     // layout; require "account" so a mint can never pass as a token account.
     require!(
@@ -98,7 +104,8 @@ pub fn checked_balance(
     Ok(u64::from_le_bytes(data[64..72].try_into().unwrap()))
 }
 
-/// Balance of a token account already validated by [`checked_balance`].
+/// Balance of a token account whose address the caller has already pinned (the router
+/// uses it only for the market's derived fee account). Checks the length only.
 pub fn balance(account: &AccountInfo) -> Result<u64> {
     let data = account.try_borrow_data()?;
     require!(data.len() >= ACCOUNT_LEN, PipelineError::BadTokenAccount);
