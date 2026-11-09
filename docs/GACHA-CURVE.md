@@ -123,3 +123,15 @@ reference for account order.
   wallets.
 - A win is paid in the launched token from the pot, never from the curve's reserves, so
   the curve's price is never affected by payouts.
+
+## On devnet
+
+| | Address |
+|---|---|
+| Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
+| Demo market (2% fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf`](https://orbmarkets.io/address/3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf/history?cluster=devnet) |
+| Demo token | `5ZMhj2g7R1QMY7ZQuZXX2e7HeBg18UCnAZ7363Skr7XC` |
+
+The program is registered with the router. The `strategies.ts` devnet script on the
+`launch-curve` branch registered it, created the demo market, made a gacha buy and
+resolved the ticket; run it with `ONLY=gacha` to create your own.
