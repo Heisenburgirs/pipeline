@@ -64,7 +64,10 @@ const LAUNCH = {
     curveSupply: 990_099_009_900_990n,
     virtualQuote: 100_010_001_000n,
     virtualToken: 10_001_000_100_010n,
-    poolFeeBps: 30,
+    poolFeeBps: 0,
+    // 0.3% of every trade to the token's creator; the program adds 0.2% for its
+    // upgrade authority.
+    creatorFeeBps: 30,
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 2% fee, 1-in-20 for a 40% bonus
 // capped at 10% of the pot, decided 10 slots after the buy. See docs/GACHA-CURVE.md.
@@ -77,6 +80,8 @@ const GACHA = {
     bonusBps: 4_000,
     maxWinPotBps: 1_000,
     revealDelaySlots: 10n,
+    // 0.5% of every trade, in either direction, goes to the pot.
+    swapFeeBps: 50,
 };
 
 const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
@@ -292,6 +297,8 @@ async function launchDemo(wallet: KeyPairSigner) {
         u64(LAUNCH.virtualQuote),
         u64(LAUNCH.virtualToken),
         u16(LAUNCH.poolFeeBps),
+        u16(LAUNCH.creatorFeeBps),
+        encoder.encode(wallet.address),
     );
     await send(
         wallet,
@@ -355,6 +362,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u16(GACHA.bonusBps),
         u16(GACHA.maxWinPotBps),
         u64(GACHA.revealDelaySlots),
+        u16(GACHA.swapFeeBps),
     );
     await send(
         wallet,

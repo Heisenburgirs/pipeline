@@ -7,7 +7,7 @@
 //!
 //! 1. **Curve.** `curve_supply` tokens sell along a constant-product curve with virtual
 //!    reserves (the pump.fun shape). Buys move quote into the curve and tokens out,
-//!    sells do the reverse, and there is no fee beyond Pipeline's.
+//!    sells do the reverse.
 //! 2. **Pool.** The buy that takes the last curve token graduates the market. The quote
 //!    raised on the curve and the `supply − curve_supply` tokens held back are paired as
 //!    a plain constant-product pool with real reserves and a `pool_fee_bps` fee that
@@ -26,6 +26,11 @@
 //! A buy that crosses the graduation point pays exactly for the remaining curve tokens
 //! and spends the rest of its input on the new pool in the same trade, so pricing is
 //! continuous and a buyer never overpays for the last curve token.
+//!
+//! Every trade in either phase pays a fee from its input: `creator_fee_bps` to the
+//! market's creator and [`PROTOCOL_FEE_BPS`] to whoever holds this program's upgrade
+//! authority. Fees accrue inside the market's vaults, in the input mint, and each party
+//! claims theirs with `claim_fees`, so no recipient account can ever block a trade.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -42,6 +47,13 @@ pub const TOKEN_DECIMALS: u8 = 6;
 /// Mint index of the quote token (what buyers pay with) and of the launched token.
 pub const QUOTE_INDEX: u8 = 0;
 pub const TOKEN_INDEX: u8 = 1;
+/// Fee on every trade, in basis points of the input, for the program's upgrade
+/// authority. Compiled in, so a market creator cannot switch it off.
+pub const PROTOCOL_FEE_BPS: u16 = 20;
+/// Cap on the creator's fee.
+pub const MAX_CREATOR_FEE_BPS: u16 = 500;
+/// The upgradeable BPF loader, owner of every upgradeable program's ProgramData.
+pub const BPF_LOADER_UPGRADEABLE: Pubkey = pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
 
 #[program]
 pub mod launch_curve {
@@ -90,10 +102,16 @@ pub mod launch_curve {
         launch.virtual_quote = params.virtual_quote;
         launch.virtual_token = params.virtual_token;
         launch.pool_fee_bps = params.pool_fee_bps;
+        launch.creator = params.creator;
+        launch.creator_fee_bps = params.creator_fee_bps;
         launch.graduated = false;
         launch.quote_reserve = 0;
         launch.token_reserve = params.curve_supply;
         launch.graduation_slot = 0;
+        launch.creator_owed_quote = 0;
+        launch.creator_owed_token = 0;
+        launch.protocol_owed_quote = 0;
+        launch.protocol_owed_token = 0;
         launch.market_signer = expected_signer;
         launch.bump = ctx.bumps.launch;
         Ok(())
@@ -164,9 +182,10 @@ pub mod launch_curve {
         );
         let hook_accounts = &ctx.remaining_accounts[1..];
 
-        let reserve_in = kind.reserve_in(launch);
+        // Unclaimed fees sit in the vault next to the reserve; neither is the trade's.
+        let held_in = add(kind.reserve_in(launch), kind.owed_in(launch))?;
         let vault_in_balance = token_balance(&ctx.accounts.input_vault.to_account_info())?;
-        let received = psi::credited_input(vault_in_balance, reserve_in, request.amount_sent);
+        let received = psi::credited_input(vault_in_balance, held_in, request.amount_sent);
         let applied = launch.apply(&psi::TradeRequest {
             amount: received,
             ..trade.clone()
@@ -196,6 +215,10 @@ pub mod launch_curve {
         launch.graduated = applied.next.graduated;
         launch.quote_reserve = applied.next.quote_reserve;
         launch.token_reserve = applied.next.token_reserve;
+        launch.creator_owed_quote = applied.next.creator_owed_quote;
+        launch.creator_owed_token = applied.next.creator_owed_token;
+        launch.protocol_owed_quote = applied.next.protocol_owed_quote;
+        launch.protocol_owed_token = applied.next.protocol_owed_token;
         if graduated_now {
             launch.graduation_slot = Clock::get()?.slot;
             emit!(Graduated {
@@ -207,6 +230,80 @@ pub mod launch_curve {
                 slot: launch.graduation_slot,
             });
         }
+        Ok(())
+    }
+
+    /// Custom action: pays the claimant's accrued fees in both mints to the token
+    /// accounts given. The market's creator claims the creator fee; the program's
+    /// upgrade authority claims the protocol fee. Remaining accounts: transfer-hook
+    /// accounts of the quote mint, if any.
+    pub fn claim_fees<'info>(ctx: Context<'info, ClaimFees<'info>>) -> Result<()> {
+        let launch = &ctx.accounts.launch;
+        let claimant = ctx.accounts.claimant.key();
+        let is_creator = claimant == launch.creator;
+        let is_protocol = {
+            let data = ctx.accounts.program_data.try_borrow_data()?;
+            upgrade_authority(&data) == Some(Some(claimant))
+        };
+        require!(is_creator || is_protocol, LaunchError::NotFeeRecipient);
+
+        let mut quote = 0u64;
+        let mut token = 0u64;
+        if is_creator {
+            quote = add(quote, launch.creator_owed_quote)?;
+            token = add(token, launch.creator_owed_token)?;
+        }
+        if is_protocol {
+            quote = add(quote, launch.protocol_owed_quote)?;
+            token = add(token, launch.protocol_owed_token)?;
+        }
+
+        let token_mint_key = launch.token_mint;
+        let bump = [launch.bump];
+        let launch_seeds: &[&[u8]] = &[b"launch", token_mint_key.as_ref(), &bump];
+        let launch_info = ctx.accounts.launch.to_account_info();
+        if quote > 0 {
+            transfer_checked(
+                &ctx.accounts.quote_token_program.to_account_info(),
+                &ctx.accounts.quote_vault.to_account_info(),
+                &ctx.accounts.quote_mint.to_account_info(),
+                &ctx.accounts.claimant_quote.to_account_info(),
+                &launch_info,
+                ctx.remaining_accounts,
+                quote,
+                ctx.accounts.quote_mint.decimals,
+                &[launch_seeds],
+            )?;
+        }
+        if token > 0 {
+            transfer_checked(
+                &ctx.accounts.token_program.to_account_info(),
+                &ctx.accounts.token_vault.to_account_info(),
+                &ctx.accounts.token_mint.to_account_info(),
+                &ctx.accounts.claimant_token.to_account_info(),
+                &launch_info,
+                &[],
+                token,
+                TOKEN_DECIMALS,
+                &[launch_seeds],
+            )?;
+        }
+
+        let launch = &mut ctx.accounts.launch;
+        if is_creator {
+            launch.creator_owed_quote = 0;
+            launch.creator_owed_token = 0;
+        }
+        if is_protocol {
+            launch.protocol_owed_quote = 0;
+            launch.protocol_owed_token = 0;
+        }
+        emit!(FeesClaimed {
+            launch: launch.key(),
+            claimant,
+            quote,
+            token,
+        });
         Ok(())
     }
 }
@@ -228,6 +325,11 @@ pub struct InitParams {
     /// Fee on pool trades after graduation, in basis points of the input. Stays in the
     /// pool.
     pub pool_fee_bps: u16,
+    /// Fee on every trade, in basis points of the input, for `creator`. At most
+    /// [`MAX_CREATOR_FEE_BPS`]. [`PROTOCOL_FEE_BPS`] is charged on top.
+    pub creator_fee_bps: u16,
+    /// Who claims the creator fee.
+    pub creator: Pubkey,
 }
 
 impl InitParams {
@@ -240,6 +342,10 @@ impl InitParams {
         require!(self.virtual_quote > 0, LaunchError::BadInitData);
         require!(self.virtual_token > 0, LaunchError::BadInitData);
         require!((self.pool_fee_bps as u128) < BPS, LaunchError::BadInitData);
+        require!(
+            self.creator_fee_bps <= MAX_CREATOR_FEE_BPS,
+            LaunchError::BadInitData
+        );
         Ok(())
     }
 }
@@ -251,11 +357,14 @@ pub struct Launch {
     pub token_mint: Pubkey,
     pub quote_vault: Pubkey,
     pub token_vault: Pubkey,
+    /// Claims the creator fee.
+    pub creator: Pubkey,
     pub supply: u64,
     pub curve_supply: u64,
     pub virtual_quote: u64,
     pub virtual_token: u64,
     pub pool_fee_bps: u16,
+    pub creator_fee_bps: u16,
     /// False while the curve is selling; true for good once it has sold out.
     pub graduated: bool,
     /// Quote tokens held from trades. After graduation, the pool's quote reserve.
@@ -266,9 +375,22 @@ pub struct Launch {
     pub token_reserve: u64,
     /// Slot of the graduating trade (0 before).
     pub graduation_slot: u64,
+    /// Fees accrued and not yet claimed. They sit in the vaults next to the reserves.
+    pub creator_owed_quote: u64,
+    pub creator_owed_token: u64,
+    pub protocol_owed_quote: u64,
+    pub protocol_owed_token: u64,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
+}
+
+#[event]
+pub struct FeesClaimed {
+    pub launch: Pubkey,
+    pub claimant: Pubkey,
+    pub quote: u64,
+    pub token: u64,
 }
 
 #[event]
@@ -319,6 +441,14 @@ impl TradeKind {
             TradeKind::Sell => launch.token_reserve,
         }
     }
+
+    /// Unclaimed fees held in the input vault.
+    fn owed_in(self, launch: &Launch) -> u64 {
+        match self {
+            TradeKind::Buy => launch.creator_owed_quote + launch.protocol_owed_quote,
+            TradeKind::Sell => launch.creator_owed_token + launch.protocol_owed_token,
+        }
+    }
 }
 
 /// A priced trade: what the router sees, the state it leaves behind, and (when the
@@ -345,9 +475,21 @@ impl Launch {
         let mut next = self.clone();
         let mut out: u64 = 0;
         let mut raised = 0;
+        // The creator's and the protocol's fees come off the input first, in the input
+        // mint, and stay in the input vault until claimed.
+        let creator_fee = fees::ceil_bps(trade.amount, self.creator_fee_bps as u64)
+            .ok_or(LaunchError::Overflow)?;
+        let protocol_fee =
+            fees::ceil_bps(trade.amount, PROTOCOL_FEE_BPS as u64).ok_or(LaunchError::Overflow)?;
+        let net_in = trade
+            .amount
+            .checked_sub(add(creator_fee, protocol_fee)?)
+            .ok_or(LaunchError::InsufficientLiquidity)?;
         match kind {
             TradeKind::Buy => {
-                let mut remaining_in = trade.amount;
+                next.creator_owed_quote = add(next.creator_owed_quote, creator_fee)?;
+                next.protocol_owed_quote = add(next.protocol_owed_quote, protocol_fee)?;
+                let mut remaining_in = net_in;
                 if !next.graduated {
                     let x = next.virtual_quote as u128 + next.quote_reserve as u128;
                     let y = next.virtual_token as u128 + next.token_reserve as u128;
@@ -385,19 +527,21 @@ impl Launch {
             }
             TradeKind::Sell => {
                 require!(next.quote_reserve > 0, LaunchError::InsufficientLiquidity);
+                next.creator_owed_token = add(next.creator_owed_token, creator_fee)?;
+                next.protocol_owed_token = add(next.protocol_owed_token, protocol_fee)?;
                 if !next.graduated {
                     let x = next.virtual_quote as u128 + next.quote_reserve as u128;
                     let y = next.virtual_token as u128 + next.token_reserve as u128;
-                    out = out_given_in(y, x, trade.amount).min(next.quote_reserve as u128) as u64;
+                    out = out_given_in(y, x, net_in).min(next.quote_reserve as u128) as u64;
                 } else {
-                    let net = after_fee(trade.amount, next.pool_fee_bps)?;
+                    let net = after_fee(net_in, next.pool_fee_bps)?;
                     out = pool_out_given_in(
                         next.token_reserve as u128,
                         next.quote_reserve as u128,
                         net,
                     );
                 }
-                next.token_reserve = add(next.token_reserve, trade.amount)?;
+                next.token_reserve = add(next.token_reserve, net_in)?;
                 next.quote_reserve -= out;
             }
         }
@@ -489,6 +633,19 @@ fn borsh_encode<T: AnchorSerialize>(value: &T) -> Result<Vec<u8>> {
     let mut encoded = Vec::new();
     value.serialize(&mut encoded)?;
     Ok(encoded)
+}
+
+/// Reads the upgrade authority from `UpgradeableLoaderState::ProgramData`
+/// (bincode: u32 tag 3, u64 slot, Option<Pubkey>). `Some(None)` means immutable.
+fn upgrade_authority(data: &[u8]) -> Option<Option<Pubkey>> {
+    if data.len() < 13 || data[..4] != 3u32.to_le_bytes() {
+        return None;
+    }
+    match data[12] {
+        0 => Some(None),
+        1 if data.len() >= 45 => Some(Some(Pubkey::new_from_array(data[13..45].try_into().ok()?))),
+        _ => None,
+    }
 }
 
 fn token_balance(account: &AccountInfo) -> Result<u64> {
@@ -697,6 +854,36 @@ pub struct SwapAccounts<'info> {
     pub output_token_program: Interface<'info, TokenInterface>,
 }
 
+#[derive(Accounts)]
+pub struct ClaimFees<'info> {
+    pub claimant: Signer<'info>,
+    #[account(mut, has_one = quote_mint, has_one = token_mint, has_one = quote_vault, has_one = token_vault)]
+    pub launch: Account<'info, Launch>,
+    #[account(mut)]
+    pub quote_vault: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
+    /// Where the quote-side fees go: any token account of the quote mint.
+    #[account(mut, token::mint = quote_mint, token::token_program = quote_token_program)]
+    pub claimant_quote: InterfaceAccount<'info, TokenAccount>,
+    /// Where the token-side fees go: any token account of the launched mint.
+    #[account(mut, token::mint = token_mint, token::token_program = token_program)]
+    pub claimant_token: InterfaceAccount<'info, TokenAccount>,
+    pub quote_mint: InterfaceAccount<'info, Mint>,
+    pub token_mint: InterfaceAccount<'info, Mint>,
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    pub token_program: Program<'info, Token>,
+    /// CHECK: this program's ProgramData, checked by address and owner; names the
+    /// upgrade authority that may claim the protocol fee.
+    #[account(
+        owner = BPF_LOADER_UPGRADEABLE,
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = BPF_LOADER_UPGRADEABLE,
+    )]
+    pub program_data: UncheckedAccount<'info>,
+}
+
 #[error_code]
 pub enum LaunchError {
     #[msg("setup data is not valid InitParams")]
@@ -711,4 +898,6 @@ pub enum LaunchError {
     ExactOutUnsupported,
     #[msg("arithmetic overflow")]
     Overflow,
+    #[msg("only the market's creator or the program's upgrade authority may claim fees")]
+    NotFeeRecipient,
 }

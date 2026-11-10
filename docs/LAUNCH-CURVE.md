@@ -21,14 +21,31 @@ Token-2022 mint). At creation the strategy:
 - creates the quote vault. Both vaults are owned by the launch PDA `["launch", token_mint]`.
 
 Mint index 0 is the quote token, 1 is the launched token. Only exact-in trades are
-supported. Pipeline's 0.25% applies to every trade in both phases.
+supported. Pipeline's 0.25% applies to every trade in both phases, on top of the fees
+below.
+
+### Fees
+
+Every trade, in either phase and either direction, pays two fees from its input:
+`creator_fee_bps` to the market's **creator** (a wallet named at creation, at most 5%)
+and `PROTOCOL_FEE_BPS` = 0.2% to whoever holds the **program's upgrade authority**. The
+second one is compiled into the program, so a market creator cannot switch it off, and it
+follows control of the program rather than a hard-coded key: upgrade the program to a new
+authority and the fee moves with it; make the program immutable and nobody can claim it.
+
+Fees are taken in the input mint (quote on a buy, token on a sell) and accrue inside the
+market's own vaults next to the reserves, recorded in four counters on the launch account.
+Each party claims theirs with the `claim_fees` custom action, to any token account of
+the right mint. Nothing about a trade depends on the recipients' accounts existing, so a
+closed wallet can never block trading. The quoter and the swap both see the net input, so
+quotes already reflect the fees.
 
 ### Phase 1: the curve
 
 `curve_supply` tokens are for sale. With `x = virtual_quote + quote_reserve` and
 `y = virtual_token + token_reserve`, a buy of `q` gives `floor(y × q / (x + q))` tokens and
-a sell of `t` gives `floor(x × t / (y + t))` quote, capped at what the vault holds. There is
-no fee of the strategy's own on the curve.
+a sell of `t` gives `floor(x × t / (y + t))` quote, capped at what the vault holds, with `q`
+and `t` the input after the fees above.
 
 The remaining `supply − curve_supply` tokens sit in the token vault but are not for sale.
 They are the pool's token side.
@@ -62,7 +79,9 @@ permanently locks the raise as liquidity.
 | `curve_supply: u64` | Tokens sold on the curve; the rest is held back for the pool |
 | `virtual_quote: u64` | Virtual quote reserve |
 | `virtual_token: u64` | Virtual token reserve, added to the tokens still for sale; the curve ends with exactly this many |
-| `pool_fee_bps: u16` | Fee on pool trades after graduation, kept in the pool |
+| `pool_fee_bps: u16` | Fee on pool trades after graduation, kept in the pool (0 in the presets) |
+| `creator_fee_bps: u16` | Fee on every trade for the creator, at most 500 |
+| `creator: Pubkey` | Who claims the creator fee |
 
 Setup accounts after the router's fixed four: quote mint, token mint (writable, signer),
 quote vault `["quote_vault", launch]`, token vault `["token_vault", launch]`, the quote
@@ -108,6 +127,16 @@ cannot go below zero, so it never prices below its opening price. The tests in
 `crates/pipeline-tests/tests/launch.rs` run the default through the router and check the
 raise, the final price and the pool's opening price.
 
+## Custom actions
+
+| Action | Signer | Accounts |
+|---|---|---|
+| `claim_fees` | the market's creator, or the program's upgrade authority | claimant (signer), launch (writable), quote vault (writable), token vault (writable), claimant's quote token account (writable), claimant's token account (writable), quote mint, token mint, quote token program, SPL Token, this program's ProgramData; then any transfer-hook accounts of the quote mint |
+
+The discriminator is Anchor's `sha256("global:claim_fees")[..8]`. A claimant who is both
+creator and upgrade authority receives both shares in one call. A `FeesClaimed` event
+reports what was paid.
+
 ## Account resolution
 
 Account resolution returns the output vault, writable, in either phase: the token vault
@@ -121,8 +150,8 @@ as usual. Nothing about a trade's accounts depends on whether the market has gra
   plain SPL Token mint.
 - There is no deadline. A curve that never sells out trades on the curve indefinitely; a
   deadline that refunds or graduates early is a natural extension.
-- The pool fee accrues to the pool itself. Routing it to a creator or a treasury is a
-  small change to `apply` plus an account.
+- The pool fee, if set, accrues to the pool itself; the creator and protocol fees are
+  the ones that leave.
 
 ## On devnet
 

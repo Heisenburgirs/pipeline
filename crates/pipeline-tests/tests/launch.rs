@@ -5,7 +5,7 @@
 mod common;
 
 use common::*;
-use pipeline_client::{self as client, pda, AccountMeta, Pubkey};
+use pipeline_client::{self as client, pda, AccountMeta, Instruction, Pubkey};
 use pipeline_quoter::{MarketView, QuoteRequest, Quoter};
 use pipeline_strategy_interface::{fees, TradeMode};
 use solana_keypair::Keypair;
@@ -27,6 +27,10 @@ const RESERVED: u64 = SUPPLY - CURVE_SUPPLY;
 const VIRTUAL_TOKEN: u64 = 10_001_000_100_010;
 const VIRTUAL_QUOTE: u64 = 100_010_001_000;
 const POOL_FEE_BPS: u16 = 30;
+/// 0.3% of every trade to the market's creator, 0.2% to the program's upgrade
+/// authority (compiled into the program).
+const CREATOR_FEE_BPS: u16 = 30;
+const PROTOCOL_FEE_BPS: u16 = 20;
 
 /// Mirrors the strategy's `InitParams`.
 #[derive(borsh::BorshSerialize)]
@@ -36,21 +40,29 @@ struct InitParams {
     virtual_quote: u64,
     virtual_token: u64,
     pool_fee_bps: u16,
+    creator_fee_bps: u16,
+    creator: [u8; 32],
 }
 
-fn params() -> InitParams {
+fn params(creator: &Pubkey) -> InitParams {
     InitParams {
         supply: SUPPLY,
         curve_supply: CURVE_SUPPLY,
         virtual_quote: VIRTUAL_QUOTE,
         virtual_token: VIRTUAL_TOKEN,
         pool_fee_bps: POOL_FEE_BPS,
+        creator_fee_bps: CREATOR_FEE_BPS,
+        creator: creator.to_bytes(),
     }
 }
 
 struct LaunchMarket {
     market: Pubkey,
     launch: Pubkey,
+    /// Claims the creator fee.
+    creator: Keypair,
+    /// The program's upgrade authority, who claims the protocol fee.
+    owner: Keypair,
     quote_mint: Pubkey,
     token_mint: Pubkey,
     quote_vault: Pubkey,
@@ -65,33 +77,42 @@ fn launch_child(seed: &[u8], launch: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[seed, launch.as_ref()], &LAUNCH_PROGRAM_ID).0
 }
 
-fn register(env: &mut Env) {
+/// Registers the program once, returning its upgrade authority, and leaves the
+/// authority in place for later markets.
+fn register(env: &mut Env) -> Keypair {
     if env
         .svm
         .get_account(&pda::strategy(&LAUNCH_PROGRAM_ID))
         .is_none()
     {
-        env.register(&LAUNCH_PROGRAM_ID, "launch_curve");
+        return env.register(&LAUNCH_PROGRAM_ID, "launch_curve");
     }
+    let owner = env.funded_keypair();
+    set_upgrade_authority(&mut env.svm, &LAUNCH_PROGRAM_ID, Some(&owner.pubkey()));
+    owner
 }
 
-/// Creates a market with `params` against a fresh 6-decimal quote mint. The token mint
-/// is a new keypair signing `create_market`.
-fn try_setup(env: &mut Env, params: &InitParams) -> Result<LaunchMarket, Box<TxResult>> {
-    register(env);
+/// Creates a market with `params(creator)` against a fresh 6-decimal quote mint. The
+/// token mint is a new keypair signing `create_market`.
+fn try_setup(
+    env: &mut Env,
+    make_params: impl FnOnce(&Pubkey) -> InitParams,
+) -> Result<LaunchMarket, Box<TxResult>> {
+    let owner = register(env);
+    let creator = env.funded_keypair();
+    let params = make_params(&creator.pubkey());
     let quote_mint = env.create_mint(&TOKEN, 6, None, None);
     let token_mint = Keypair::new();
     let launch = launch_pda(&token_mint.pubkey());
     let quote_vault = launch_child(b"quote_vault", &launch);
     let token_vault = launch_child(b"token_vault", &launch);
 
-    let creator = env.funded_keypair();
     let ix = client::create_market(&client::CreateMarket {
         creator: creator.pubkey(),
         strategy_program: LAUNCH_PROGRAM_ID,
         market_state: launch,
         market_state_signs: false,
-        init_data: borsh::to_vec(params).unwrap(),
+        init_data: borsh::to_vec(&params).unwrap(),
         max_creator_lamports: MAX_SETUP_LAMPORTS,
         strategy_accounts: vec![
             AccountMeta::new_readonly(quote_mint, false),
@@ -121,6 +142,8 @@ fn try_setup(env: &mut Env, params: &InitParams) -> Result<LaunchMarket, Box<TxR
     Ok(LaunchMarket {
         market,
         launch,
+        creator,
+        owner,
         quote_mint,
         token_mint: token_mint.pubkey(),
         quote_vault,
@@ -129,15 +152,45 @@ fn try_setup(env: &mut Env, params: &InitParams) -> Result<LaunchMarket, Box<TxR
 }
 
 fn setup(env: &mut Env) -> LaunchMarket {
-    try_setup(env, &params()).unwrap_or_else(|_| panic!("create_market"))
+    try_setup(env, params).unwrap_or_else(|_| panic!("create_market"))
 }
 
 /// The launch account's `(graduated, quote_reserve, token_reserve, graduation_slot)`.
 fn state(env: &Env, m: &LaunchMarket) -> (bool, u64, u64, u64) {
     let data = env.account_data(&m.launch);
     let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
-    // 8 discriminator + 4 pubkeys + 4 u64 + u16 = 170.
-    (data[170] == 1, at(171), at(179), at(187))
+    // 8 discriminator + 5 pubkeys + 4 u64 + 2 u16 = 204.
+    (data[204] == 1, at(205), at(213), at(221))
+}
+
+/// Unclaimed fees: `(creator quote, creator token, protocol quote, protocol token)`.
+fn owed(env: &Env, m: &LaunchMarket) -> (u64, u64, u64, u64) {
+    let data = env.account_data(&m.launch);
+    let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
+    (at(229), at(237), at(245), at(253))
+}
+
+/// The creator's and protocol's fees on an input of `amount`.
+fn trade_fees(amount: u64) -> (u64, u64) {
+    (
+        fees::ceil_bps(amount, CREATOR_FEE_BPS as u64).unwrap(),
+        fees::ceil_bps(amount, PROTOCOL_FEE_BPS as u64).unwrap(),
+    )
+}
+
+/// What is left of an input after both fees.
+fn net_in(amount: u64) -> u64 {
+    let (creator, protocol) = trade_fees(amount);
+    amount - creator - protocol
+}
+
+/// The smallest input whose net after fees is exactly `target`.
+fn gross_up(target: u64) -> u64 {
+    let guess = (target as u128 * 10_000
+        / (10_000 - CREATOR_FEE_BPS as u128 - PROTOCOL_FEE_BPS as u128)) as u64;
+    (guess.saturating_sub(8)..guess + 8)
+        .find(|a| net_in(*a) == target)
+        .expect("a gross amount nets to the target")
 }
 
 fn reserves(env: &Env, m: &LaunchMarket) -> (u64, u64) {
@@ -170,9 +223,11 @@ fn pool_out(reserve_in: u64, reserve_out: u64, amount_in: u64) -> u64 {
     out_given_in(reserve_in as u128, reserve_out as u128, net).min(reserve_out - 1)
 }
 
-/// What a buy of `amount` gives, mirroring the strategy across graduation.
+/// What a buy of `amount` gives, mirroring the strategy across graduation: the fees
+/// come off first, the rest trades.
 fn price_buy(env: &Env, m: &LaunchMarket, amount: u64) -> u64 {
     let (graduated, quote_reserve, token_reserve, _) = state(env, m);
+    let amount = net_in(amount);
     if graduated {
         return pool_out(quote_reserve, token_reserve, amount);
     }
@@ -193,6 +248,7 @@ fn price_buy(env: &Env, m: &LaunchMarket, amount: u64) -> u64 {
 
 fn price_sell(env: &Env, m: &LaunchMarket, amount: u64) -> u64 {
     let (graduated, quote_reserve, token_reserve, _) = state(env, m);
+    let amount = net_in(amount);
     if graduated {
         return pool_out(token_reserve, quote_reserve, amount);
     }
@@ -280,6 +336,38 @@ fn sell(env: &mut Env, m: &LaunchMarket, t: &(Keypair, Pubkey, Pubkey), amount: 
     let got = env.token_balance(&t.1) - before;
     assert_eq!(got, expected, "sell output");
     got
+}
+
+/// The associated token account, created if it does not exist yet.
+fn ata_for(env: &mut Env, owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    let address = pda::associated_token(owner, mint, &TOKEN);
+    if env.svm.get_account(&address).is_none() {
+        env.create_ata(owner, mint, &TOKEN);
+    }
+    address
+}
+
+/// `claim_fees` by `claimant`, paid to their associated token accounts.
+fn claim_fees_ix(env: &mut Env, m: &LaunchMarket, claimant: &Pubkey) -> Instruction {
+    let claimant_quote = ata_for(env, claimant, &m.quote_mint);
+    let claimant_token = ata_for(env, claimant, &m.token_mint);
+    Instruction::new_with_bytes(
+        LAUNCH_PROGRAM_ID,
+        &client::instruction_discriminator("claim_fees"),
+        vec![
+            AccountMeta::new_readonly(*claimant, true),
+            AccountMeta::new(m.launch, false),
+            AccountMeta::new(m.quote_vault, false),
+            AccountMeta::new(m.token_vault, false),
+            AccountMeta::new(claimant_quote, false),
+            AccountMeta::new(claimant_token, false),
+            AccountMeta::new_readonly(m.quote_mint, false),
+            AccountMeta::new_readonly(m.token_mint, false),
+            AccountMeta::new_readonly(TOKEN, false),
+            AccountMeta::new_readonly(TOKEN, false),
+            AccountMeta::new_readonly(pda::program_data(&LAUNCH_PROGRAM_ID), false),
+        ],
+    )
 }
 
 // ------------------------------------------------------------------- the quoter
@@ -373,33 +461,29 @@ fn market_creation_fixes_the_supply_and_holds_back_the_pool_share() {
 #[test]
 fn bad_parameters_are_refused() {
     let mut env = Env::new();
-    let refused = |env: &mut Env, p: InitParams| {
-        let failed = try_setup(env, &p).err().expect("create_market should fail");
+    let refused = |env: &mut Env, p: fn(&Pubkey) -> InitParams| {
+        let failed = try_setup(env, p).err().expect("create_market should fail");
         assert_fails_with(*failed, "BadInitData");
     };
     // Nothing held back for the pool.
-    refused(
-        &mut env,
-        InitParams {
-            curve_supply: SUPPLY,
-            ..params()
-        },
-    );
+    refused(&mut env, |c| InitParams {
+        curve_supply: SUPPLY,
+        ..params(c)
+    });
     // The curve would hit an infinite price as it sells out.
-    refused(
-        &mut env,
-        InitParams {
-            virtual_token: 0,
-            ..params()
-        },
-    );
-    refused(
-        &mut env,
-        InitParams {
-            pool_fee_bps: 10_000,
-            ..params()
-        },
-    );
+    refused(&mut env, |c| InitParams {
+        virtual_token: 0,
+        ..params(c)
+    });
+    refused(&mut env, |c| InitParams {
+        pool_fee_bps: 10_000,
+        ..params(c)
+    });
+    // The creator fee is capped at 5%.
+    refused(&mut env, |c| InitParams {
+        creator_fee_bps: 501,
+        ..params(c)
+    });
 }
 
 #[test]
@@ -413,9 +497,14 @@ fn curve_trades_follow_the_curve_and_match_quotes() {
     let amount = 10 * USD;
     let got = buy(&mut env, &m, &t, amount);
     let opening_price = VIRTUAL_QUOTE as f64 / (VIRTUAL_TOKEN + CURVE_SUPPLY) as f64;
+    // 0.5% dearer than the curve itself: the creator's and protocol's fees.
     let paid_per_token = amount as f64 / got as f64;
-    assert!((paid_per_token / opening_price - 1.0).abs() < 1e-3);
-    assert_eq!(reserves(&env, &m), (amount, CURVE_SUPPLY - got));
+    assert!((paid_per_token / opening_price - 1.005).abs() < 1e-3);
+    let (creator_fee, protocol_fee) = trade_fees(amount);
+    assert_eq!((creator_fee, protocol_fee), (30_000, 20_000));
+    assert_eq!(reserves(&env, &m), (net_in(amount), CURVE_SUPPLY - got));
+    assert_eq!(owed(&env, &m), (creator_fee, 0, protocol_fee, 0));
+    assert_eq!(env.token_balance(&m.quote_vault), amount);
     assert_eq!(
         env.token_balance(&t.1),
         1_000_000 * USD - amount - fees::pipeline_fee(amount)
@@ -429,9 +518,14 @@ fn curve_trades_follow_the_curve_and_match_quotes() {
         env.token_balance(&t.2),
         got - half - fees::pipeline_fee(half)
     );
+    let (creator_token, protocol_token) = trade_fees(half);
     assert_eq!(
         reserves(&env, &m),
-        (amount - back, CURVE_SUPPLY - got + half)
+        (net_in(amount) - back, CURVE_SUPPLY - got + net_in(half))
+    );
+    assert_eq!(
+        owed(&env, &m),
+        (creator_fee, creator_token, protocol_fee, protocol_token)
     );
     assert!(!state(&env, &m).0);
 
@@ -468,16 +562,16 @@ fn the_buy_that_sells_out_the_curve_graduates_it_into_the_pool() {
     let raise = quote_reserve + cost;
     let pool_leg = pool_out(raise, RESERVED, extra);
     assert!(pool_leg > 0);
-    assert_eq!(price_buy(&env, &m, cost + extra), left + pool_leg);
+    // Gross the input up so that, after the 0.5% of fees, cost + extra reaches the curve.
+    let amount = gross_up(cost + extra);
+    assert_eq!(price_buy(&env, &m, amount), left + pool_leg);
 
     let before = env.token_balance(&t.2);
+    let (_, _, owed_quote_before, _) = owed(&env, &m);
     let accounts = swap_accounts(&m, &t.0.pubkey(), true, &t.1, &t.2);
     let meta = env
         .send(
-            &[client::swap(
-                &accounts,
-                &exact_in(cost + extra, left + pool_leg),
-            )],
+            &[client::swap(&accounts, &exact_in(amount, left + pool_leg))],
             &[&t.0],
         )
         .expect("graduating buy");
@@ -488,7 +582,13 @@ fn the_buy_that_sells_out_the_curve_graduates_it_into_the_pool() {
         (true, raise + extra, RESERVED - pool_leg, slot)
     );
     assert_eq!(env.token_balance(&m.token_vault), RESERVED - pool_leg);
-    assert_eq!(env.token_balance(&m.quote_vault), raise + extra);
+    // The quote vault holds the pool's reserve plus every unclaimed fee.
+    let (creator_quote, _, protocol_quote, _) = owed(&env, &m);
+    assert_eq!(
+        env.token_balance(&m.quote_vault),
+        raise + extra + creator_quote + protocol_quote
+    );
+    assert!(protocol_quote > owed_quote_before);
     // The strategy logs its Graduated event.
     assert!(meta.logs.iter().any(|l| l.starts_with("Program data:")));
 
@@ -514,13 +614,14 @@ fn a_buy_for_exactly_the_remaining_cost_graduates_with_no_pool_leg() {
 
     let (x, y) = curve_xy(0, CURVE_SUPPLY);
     let cost = cost_for(x, y, CURVE_SUPPLY);
+    let amount = gross_up(cost);
 
     // One unit short leaves at least one curve token and does not graduate.
-    let short = price_buy(&env, &m, cost - 1);
+    let short = price_buy(&env, &m, amount - 1);
     assert!(short < CURVE_SUPPLY);
-    assert_eq!(quoted(&env, &m, true, cost - 1), short);
+    assert_eq!(quoted(&env, &m, true, amount - 1), short);
 
-    let got = buy(&mut env, &m, &t, cost);
+    let got = buy(&mut env, &m, &t, amount);
     assert_eq!(got, CURVE_SUPPLY);
     let (graduated, quote_reserve, token_reserve, _) = state(&env, &m);
     assert!(graduated);
@@ -534,7 +635,9 @@ fn after_graduation_trades_follow_the_pool_and_never_return_to_the_curve() {
     let m = setup(&mut env);
     let whale = trader(&mut env, &m, 20_000_000 * USD);
     let (x, y) = curve_xy(0, CURVE_SUPPLY);
-    buy(&mut env, &m, &whale, cost_for(x, y, CURVE_SUPPLY));
+    let cost = cost_for(x, y, CURVE_SUPPLY);
+    let amount = gross_up(cost);
+    buy(&mut env, &m, &whale, amount);
     let (_, pool_quote, pool_token, _) = state(&env, &m);
     assert!(state(&env, &m).0);
 
@@ -542,12 +645,15 @@ fn after_graduation_trades_follow_the_pool_and_never_return_to_the_curve() {
     let t = trader(&mut env, &m, 1_000_000 * USD);
     let amount = 10_000 * USD;
     let got = buy(&mut env, &m, &t, amount);
-    assert_eq!(got, pool_out(pool_quote, pool_token, amount));
-    // Just over $1 per token, since the pool opened at parity: 0.3% fee plus ~0.1% of
-    // impact on a $9.9M pool.
+    assert_eq!(got, pool_out(pool_quote, pool_token, net_in(amount)));
+    // Just over $1 per token, since the pool opened at parity: 0.5% of fees, the 0.3%
+    // pool fee and ~0.1% of impact on a $9.9M pool.
     let paid = amount as f64 / got as f64;
-    assert!(paid > 1.0 && paid < 1.01, "{paid}");
-    assert_eq!(reserves(&env, &m), (pool_quote + amount, pool_token - got));
+    assert!(paid > 1.0 && paid < 1.012, "{paid}");
+    assert_eq!(
+        reserves(&env, &m),
+        (pool_quote + net_in(amount), pool_token - got)
+    );
 
     // Selling nearly everything back (Pipeline takes its fee on a sell in the token, so
     // the trader keeps a little) leaves the pool richer and still graduated.
@@ -558,14 +664,88 @@ fn after_graduation_trades_follow_the_pool_and_never_return_to_the_curve() {
     assert!(graduated);
     assert_eq!(
         (quote_after, token_after),
-        (pool_quote + amount - back, pool_token - got + sold)
+        (
+            pool_quote + net_in(amount) - back,
+            pool_token - got + net_in(sold)
+        )
     );
-    assert_eq!(env.token_balance(&m.quote_vault), quote_after);
+    let (creator_quote, _, protocol_quote, _) = owed(&env, &m);
+    assert_eq!(
+        env.token_balance(&m.quote_vault),
+        quote_after + creator_quote + protocol_quote
+    );
 
     // The whale dumping most of the supply moves the pool, never the curve: the sell is
     // priced on real reserves alone.
     let dump = CURVE_SUPPLY / 2;
     let out = sell(&mut env, &m, &whale, dump);
-    assert_eq!(out, pool_out(token_after, quote_after, dump));
+    assert_eq!(out, pool_out(token_after, quote_after, net_in(dump)));
     assert!(state(&env, &m).0);
+}
+
+#[test]
+fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_owner() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    let t = trader(&mut env, &m, 1_000_000 * USD);
+
+    // A buy and a sell leave fees in both mints.
+    let amount = 50_000 * USD;
+    let got = buy(&mut env, &m, &t, amount);
+    let sold = got / 2;
+    sell(&mut env, &m, &t, sold);
+    let (creator_quote, creator_token, protocol_quote, protocol_token) = owed(&env, &m);
+    assert_eq!(
+        (creator_quote, protocol_quote),
+        (trade_fees(amount).0, trade_fees(amount).1)
+    );
+    assert_eq!(
+        (creator_token, protocol_token),
+        (trade_fees(sold).0, trade_fees(sold).1)
+    );
+    assert!(creator_quote > protocol_quote && creator_token > protocol_token);
+
+    // A stranger cannot claim.
+    let stranger = env.funded_keypair();
+    let ix = claim_fees_ix(&mut env, &m, &stranger.pubkey());
+    assert_fails_with(env.send(&[ix], &[&stranger]), "NotFeeRecipient");
+
+    // The creator claims the 0.3% side; the protocol's share stays put.
+    let creator = m.creator.pubkey();
+    let ix = claim_fees_ix(&mut env, &m, &creator);
+    env.send(&[ix], &[&m.creator]).expect("creator claims");
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&creator, &m.quote_mint, &TOKEN)),
+        creator_quote
+    );
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&creator, &m.token_mint, &TOKEN)),
+        creator_token
+    );
+    assert_eq!(owed(&env, &m), (0, 0, protocol_quote, protocol_token));
+
+    // The program's upgrade authority claims the 0.2% side.
+    let owner = m.owner.pubkey();
+    let ix = claim_fees_ix(&mut env, &m, &owner);
+    env.send(&[ix], &[&m.owner]).expect("owner claims");
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&owner, &m.quote_mint, &TOKEN)),
+        protocol_quote
+    );
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&owner, &m.token_mint, &TOKEN)),
+        protocol_token
+    );
+    assert_eq!(owed(&env, &m), (0, 0, 0, 0));
+
+    // Claims never touch the reserves, and trading continues on exactly them.
+    let (quote_reserve, token_reserve) = reserves(&env, &m);
+    assert_eq!(env.token_balance(&m.quote_vault), quote_reserve);
+    assert_eq!(env.token_balance(&m.token_vault), token_reserve + RESERVED);
+    buy(&mut env, &m, &t, 1_000 * USD);
+
+    // Once the program is made immutable, nobody can claim the protocol side.
+    set_upgrade_authority(&mut env.svm, &LAUNCH_PROGRAM_ID, None);
+    let ix = claim_fees_ix(&mut env, &m, &owner);
+    assert_fails_with(env.send(&[ix], &[&m.owner]), "NotFeeRecipient");
 }
