@@ -70,7 +70,7 @@ const LAUNCH = {
     creatorFeeBps: 30,
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 1-in-100 for a 20% bonus capped
-// at 10% of the pot, decided 10 slots after the buy. Every trade pays 0.5%: 0.3% to the
+// at 10% of the pot and 1-in-100,000 for a 100x jackpot, decided 10 slots after the buy. Every trade pays 0.5%: 0.3% to the
 // pot, 0.05% left in the curve, 0.05% to the creator and 0.1% to the program authority.
 // See docs/GACHA-CURVE.md.
 const GACHA = {
@@ -84,6 +84,10 @@ const GACHA = {
     potFeeBps: 30,
     curveFeeBps: 5,
     creatorFeeBps: 5,
+    // 1 in 100,000 hits a 100x jackpot, capped at half the pot.
+    jackpotOneIn: 100_000,
+    jackpotBps: 1_000_000,
+    maxJackpotPotBps: 5_000,
 };
 
 const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
@@ -396,6 +400,9 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u16(GACHA.curveFeeBps),
         u16(GACHA.creatorFeeBps),
         encoder.encode(wallet.address),
+        u32(GACHA.jackpotOneIn),
+        u32(GACHA.jackpotBps),
+        u16(GACHA.maxJackpotPotBps),
     );
     await send(
         wallet,
