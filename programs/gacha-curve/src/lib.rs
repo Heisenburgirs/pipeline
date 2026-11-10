@@ -6,14 +6,17 @@
 //! authority, so the supply is fixed. Buys move quote into the curve and tokens out;
 //! sells do the reverse. Every trade reprices the curve.
 //!
-//! Every trade also pays `swap_fee_bps` of its input into the **pot**: on a buy the fee is
-//! spent on the curve and the tokens it buys go to the pot, on a sell the fee is taken in
-//! tokens and moved to the pot directly. The pot is what gacha wins are paid from, so
-//! all trading funds the prizes.
+//! Every trade pays a fee from its input, split four ways. `pot_fee_bps` goes to the
+//! **pot**: on a buy it is spent on the curve and the tokens it buys go to the pot, on a
+//! sell it is taken in tokens and moved to the pot directly. `curve_fee_bps` stays in
+//! the curve's own reserves (quote on a buy, tokens on a sell), lifting the price for
+//! every holder. `creator_fee_bps` accrues for the market's creator and
+//! [`PROTOCOL_FEE_BPS`] for whoever holds this program's upgrade authority, the
+//! launchpad; both sit in the vaults until claimed with `claim_fees`. The pot is what
+//! gacha wins are paid from, so all trading funds the prizes.
 //!
-//! The gacha is opt-in per buy. A buyer who sets the first byte of the trade's `extra`
-//! to 1 pays `gacha_fee_bps` of their input on top of the swap fee. It is spent into
-//! the pot the same way. The buyer's ticket is armed with the slot of the buy. After
+//! The gacha is opt-in per buy and costs nothing extra. A buyer who sets the first byte
+//! of the trade's `extra` to 1 has their ticket armed with the slot of the buy. After
 //! `reveal_delay_slots`, anyone may resolve the ticket: the hash of the first block at
 //! or after the reveal slot decides a 1-in-`win_one_in` roll, and a win pays
 //! `bonus_bps` of the buyer's base output from the pot, capped at `max_win_pot_bps` of
@@ -52,6 +55,13 @@ pub const QUOTE_INDEX: u8 = 0;
 pub const TOKEN_INDEX: u8 = 1;
 /// The SlotHashes sysvar, read by `resolve_ticket`.
 pub const SLOT_HASHES_SYSVAR: Pubkey = pubkey!("SysvarS1otHashes111111111111111111111111111");
+/// Fee on every trade, in basis points of the input, for the program's upgrade
+/// authority (the launchpad). Compiled in, so a market creator cannot switch it off.
+pub const PROTOCOL_FEE_BPS: u16 = 10;
+/// Cap on the creator's fee.
+pub const MAX_CREATOR_FEE_BPS: u16 = 500;
+/// The upgradeable BPF loader, owner of every upgradeable program's ProgramData.
+pub const BPF_LOADER_UPGRADEABLE: Pubkey = pubkey!("BPFLoaderUpgradeab1e11111111111111111111111");
 
 #[program]
 pub mod gacha_curve {
@@ -100,12 +110,18 @@ pub mod gacha_curve {
         curve.token_reserve = params.supply;
         curve.virtual_quote = params.virtual_quote;
         curve.virtual_token = params.virtual_token;
-        curve.gacha_fee_bps = params.gacha_fee_bps;
         curve.win_one_in = params.win_one_in;
         curve.bonus_bps = params.bonus_bps;
         curve.max_win_pot_bps = params.max_win_pot_bps;
         curve.reveal_delay_slots = params.reveal_delay_slots;
-        curve.swap_fee_bps = params.swap_fee_bps;
+        curve.pot_fee_bps = params.pot_fee_bps;
+        curve.curve_fee_bps = params.curve_fee_bps;
+        curve.creator_fee_bps = params.creator_fee_bps;
+        curve.creator = params.creator;
+        curve.creator_owed_quote = 0;
+        curve.creator_owed_token = 0;
+        curve.protocol_owed_quote = 0;
+        curve.protocol_owed_token = 0;
         curve.market_signer = expected_signer;
         curve.bump = ctx.bumps.curve;
         Ok(())
@@ -195,9 +211,13 @@ pub mod gacha_curve {
         );
         let hook_accounts = &ctx.remaining_accounts[own_count..];
 
-        let reserve_in = kind.reserve_in(curve);
+        // Unclaimed fees sit in the vault next to the reserve; neither is the trade's.
+        let held_in = kind
+            .reserve_in(curve)
+            .checked_add(kind.owed_in(curve))
+            .ok_or(GachaError::Overflow)?;
         let vault_in_balance = token_balance(&ctx.accounts.input_vault.to_account_info())?;
-        let received = psi::credited_input(vault_in_balance, reserve_in, request.amount_sent);
+        let received = psi::credited_input(vault_in_balance, held_in, request.amount_sent);
         let priced = curve.quote(&psi::TradeRequest {
             amount: received,
             ..trade.clone()
@@ -269,20 +289,37 @@ pub mod gacha_curve {
         // Move the recorded reserves by the trade itself, not from vault balances, so
         // tokens sent straight to a vault stay out of the price.
         let curve = &mut ctx.accounts.curve;
+        let claimable = priced.creator_fee + priced.protocol_fee;
         match kind {
             TradeKind::Buy | TradeKind::GachaBuy => {
                 curve.quote_reserve = curve
                     .quote_reserve
-                    .checked_add(priced.quote.amount_in)
+                    .checked_add(priced.quote.amount_in - claimable)
                     .ok_or(GachaError::Overflow)?;
                 curve.token_reserve -= priced.quote.amount_out + priced.pot_out;
+                curve.creator_owed_quote = curve
+                    .creator_owed_quote
+                    .checked_add(priced.creator_fee)
+                    .ok_or(GachaError::Overflow)?;
+                curve.protocol_owed_quote = curve
+                    .protocol_owed_quote
+                    .checked_add(priced.protocol_fee)
+                    .ok_or(GachaError::Overflow)?;
             }
             TradeKind::Sell => {
                 curve.token_reserve = curve
                     .token_reserve
-                    .checked_add(priced.quote.amount_in - priced.pot_in)
+                    .checked_add(priced.quote.amount_in - priced.pot_in - claimable)
                     .ok_or(GachaError::Overflow)?;
                 curve.quote_reserve -= priced.quote.amount_out;
+                curve.creator_owed_token = curve
+                    .creator_owed_token
+                    .checked_add(priced.creator_fee)
+                    .ok_or(GachaError::Overflow)?;
+                curve.protocol_owed_token = curve
+                    .protocol_owed_token
+                    .checked_add(priced.protocol_fee)
+                    .ok_or(GachaError::Overflow)?;
             }
         }
         Ok(())
@@ -374,6 +411,80 @@ pub mod gacha_curve {
         });
         Ok(())
     }
+
+    /// Custom action: pays the claimant's accrued fees in both mints to the token
+    /// accounts given. The market's creator claims the creator fee; the program's
+    /// upgrade authority claims the protocol fee. Remaining accounts: transfer-hook
+    /// accounts of the quote mint, if any.
+    pub fn claim_fees<'info>(ctx: Context<'info, ClaimFees<'info>>) -> Result<()> {
+        let curve = &ctx.accounts.curve;
+        let claimant = ctx.accounts.claimant.key();
+        let is_creator = claimant == curve.creator;
+        let is_protocol = {
+            let data = ctx.accounts.program_data.try_borrow_data()?;
+            upgrade_authority(&data) == Some(Some(claimant))
+        };
+        require!(is_creator || is_protocol, GachaError::NotFeeRecipient);
+
+        let mut quote = 0u64;
+        let mut token = 0u64;
+        if is_creator {
+            quote += curve.creator_owed_quote;
+            token += curve.creator_owed_token;
+        }
+        if is_protocol {
+            quote += curve.protocol_owed_quote;
+            token += curve.protocol_owed_token;
+        }
+
+        let token_mint_key = curve.token_mint;
+        let bump = [curve.bump];
+        let curve_seeds: &[&[u8]] = &[b"curve", token_mint_key.as_ref(), &bump];
+        let curve_info = ctx.accounts.curve.to_account_info();
+        if quote > 0 {
+            transfer_checked(
+                &ctx.accounts.quote_token_program.to_account_info(),
+                &ctx.accounts.quote_vault.to_account_info(),
+                &ctx.accounts.quote_mint.to_account_info(),
+                &ctx.accounts.claimant_quote.to_account_info(),
+                &curve_info,
+                ctx.remaining_accounts,
+                quote,
+                ctx.accounts.quote_mint.decimals,
+                &[curve_seeds],
+            )?;
+        }
+        if token > 0 {
+            transfer_checked(
+                &ctx.accounts.token_program.to_account_info(),
+                &ctx.accounts.token_vault.to_account_info(),
+                &ctx.accounts.token_mint.to_account_info(),
+                &ctx.accounts.claimant_token.to_account_info(),
+                &curve_info,
+                &[],
+                token,
+                TOKEN_DECIMALS,
+                &[curve_seeds],
+            )?;
+        }
+
+        let curve = &mut ctx.accounts.curve;
+        if is_creator {
+            curve.creator_owed_quote = 0;
+            curve.creator_owed_token = 0;
+        }
+        if is_protocol {
+            curve.protocol_owed_quote = 0;
+            curve.protocol_owed_token = 0;
+        }
+        emit!(FeesClaimed {
+            curve: curve.key(),
+            claimant,
+            quote,
+            token,
+        });
+        Ok(())
+    }
 }
 
 /// Setup data of `pipeline_init_market`, Borsh-encoded.
@@ -386,8 +497,6 @@ pub struct InitParams {
     /// Virtual token reserve added to the real one when pricing, so the price stays
     /// finite as the supply sells out.
     pub virtual_token: u64,
-    /// Fee on gacha buys, in basis points of the input. Spent on the curve into the pot.
-    pub gacha_fee_bps: u16,
     /// A gacha buy wins with probability 1 in this many.
     pub win_one_in: u32,
     /// Win size in basis points of the buyer's base output.
@@ -397,7 +506,14 @@ pub struct InitParams {
     /// Slots between a gacha buy and the slot whose block hash decides it.
     pub reveal_delay_slots: u64,
     /// Fee on every trade, in basis points of the input, paid into the pot.
-    pub swap_fee_bps: u16,
+    pub pot_fee_bps: u16,
+    /// Fee on every trade, in basis points of the input, left in the curve's reserves.
+    pub curve_fee_bps: u16,
+    /// Fee on every trade, in basis points of the input, for `creator`. At most
+    /// [`MAX_CREATOR_FEE_BPS`]. [`PROTOCOL_FEE_BPS`] is charged on top.
+    pub creator_fee_bps: u16,
+    /// Who claims the creator fee.
+    pub creator: Pubkey,
 }
 
 impl InitParams {
@@ -405,7 +521,15 @@ impl InitParams {
         require!(self.supply > 0, GachaError::BadInitData);
         require!(self.virtual_quote > 0, GachaError::BadInitData);
         require!(
-            (self.swap_fee_bps as u128 + self.gacha_fee_bps as u128) < BPS,
+            self.creator_fee_bps <= MAX_CREATOR_FEE_BPS,
+            GachaError::BadInitData
+        );
+        require!(
+            (self.pot_fee_bps as u128
+                + self.curve_fee_bps as u128
+                + self.creator_fee_bps as u128
+                + PROTOCOL_FEE_BPS as u128)
+                < BPS,
             GachaError::BadInitData
         );
         require!(self.win_one_in >= 1, GachaError::BadInitData);
@@ -433,13 +557,23 @@ pub struct Curve {
     pub token_reserve: u64,
     pub virtual_quote: u64,
     pub virtual_token: u64,
-    pub gacha_fee_bps: u16,
     pub win_one_in: u32,
     pub bonus_bps: u16,
     pub max_win_pot_bps: u16,
     pub reveal_delay_slots: u64,
     /// Fee on every trade, paid into the pot.
-    pub swap_fee_bps: u16,
+    pub pot_fee_bps: u16,
+    /// Fee on every trade, left in the curve's reserves.
+    pub curve_fee_bps: u16,
+    /// Fee on every trade, accrued for `creator`.
+    pub creator_fee_bps: u16,
+    /// Claims the creator fee.
+    pub creator: Pubkey,
+    /// Fees accrued and not yet claimed. They sit in the vaults next to the reserves.
+    pub creator_owed_quote: u64,
+    pub creator_owed_token: u64,
+    pub protocol_owed_quote: u64,
+    pub protocol_owed_token: u64,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
@@ -458,6 +592,14 @@ pub struct Ticket {
     /// The buyer's base output, which the bonus is a share of.
     pub stake: u64,
     pub bump: u8,
+}
+
+#[event]
+pub struct FeesClaimed {
+    pub curve: Pubkey,
+    pub claimant: Pubkey,
+    pub quote: u64,
+    pub token: u64,
 }
 
 #[event]
@@ -525,6 +667,16 @@ impl TradeKind {
         }
     }
 
+    /// Unclaimed fees held in the input vault.
+    fn owed_in(self, curve: &Curve) -> u64 {
+        match self {
+            TradeKind::Buy | TradeKind::GachaBuy => {
+                curve.creator_owed_quote + curve.protocol_owed_quote
+            }
+            TradeKind::Sell => curve.creator_owed_token + curve.protocol_owed_token,
+        }
+    }
+
     /// Strategy accounts that precede the transfer-hook accounts in `pipeline_swap`.
     fn own_account_count(self) -> usize {
         match self {
@@ -534,16 +686,45 @@ impl TradeKind {
     }
 }
 
-/// A priced trade: what the router sees, plus what the pot receives: tokens the fees
-/// bought from the token vault on a buy (`pot_out`), or the fee in tokens on a sell
-/// (`pot_in`).
+/// A priced trade: what the router sees, what the pot receives (tokens the pot fee
+/// bought from the token vault on a buy, `pot_out`, or the pot fee in tokens on a sell,
+/// `pot_in`), and the fees accrued for the creator and the protocol in the input mint.
 struct Priced {
     quote: psi::QuoteResult,
     pot_out: u64,
     pot_in: u64,
+    creator_fee: u64,
+    protocol_fee: u64,
+}
+
+/// The four fees on one trade, each rounded up.
+struct Fees {
+    pot: u64,
+    curve: u64,
+    creator: u64,
+    protocol: u64,
+}
+
+impl Fees {
+    fn total(&self) -> u64 {
+        self.pot + self.curve + self.creator + self.protocol
+    }
 }
 
 impl Curve {
+    /// The fees on an input of `amount`.
+    fn fees_on(&self, amount: u64) -> Result<Fees> {
+        let bps = |rate: u16| fees::ceil_bps(amount, rate as u64).ok_or(GachaError::Overflow);
+        let fees = Fees {
+            pot: bps(self.pot_fee_bps)?,
+            curve: bps(self.curve_fee_bps)?,
+            creator: bps(self.creator_fee_bps)?,
+            protocol: bps(PROTOCOL_FEE_BPS)?,
+        };
+        require!(fees.total() <= amount, GachaError::InsufficientLiquidity);
+        Ok(fees)
+    }
+
     /// The single pricing function used by both `pipeline_quote` and `pipeline_swap`.
     fn quote(&self, trade: &psi::TradeRequest) -> Result<Priced> {
         require!(
@@ -556,19 +737,17 @@ impl Curve {
         match kind {
             TradeKind::Buy | TradeKind::GachaBuy => {
                 require!(self.token_reserve > 0, GachaError::InsufficientLiquidity);
-                // The swap fee, plus the gacha fee on an opt-in buy, come off the input
-                // and buy for the pot from the curve as it stands after the base buy.
-                let mut fee_bps = self.swap_fee_bps as u64;
-                if kind == TradeKind::GachaBuy {
-                    fee_bps += self.gacha_fee_bps as u64;
-                }
-                let fee = fees::ceil_bps(trade.amount, fee_bps).ok_or(GachaError::Overflow)?;
-                let base = trade.amount - fee;
+                // All four fees come off the input; a gacha buy pays nothing extra. The
+                // pot fee buys for the pot from the curve as it stands after the base
+                // buy, the curve fee just stays in the quote reserve, and the creator's
+                // and protocol's accrue in the quote vault until claimed.
+                let fees = self.fees_on(trade.amount)?;
+                let base = trade.amount - fees.total();
                 let out = out_given_in(x, y, base).min(self.token_reserve as u128) as u64;
                 let x_after = x + base as u128;
                 let y_after = y - out as u128;
                 let left = (self.token_reserve - out) as u128;
-                let pot_out = out_given_in(x_after, y_after, fee).min(left) as u64;
+                let pot_out = out_given_in(x_after, y_after, fees.pot).min(left) as u64;
                 Ok(Priced {
                     quote: psi::QuoteResult {
                         amount_in: trade.amount,
@@ -576,14 +755,17 @@ impl Curve {
                     },
                     pot_out,
                     pot_in: 0,
+                    creator_fee: fees.creator,
+                    protocol_fee: fees.protocol,
                 })
             }
             TradeKind::Sell => {
                 require!(self.quote_reserve > 0, GachaError::InsufficientLiquidity);
-                // The swap fee is taken in tokens and goes to the pot; the rest sells.
-                let fee = fees::ceil_bps(trade.amount, self.swap_fee_bps as u64)
-                    .ok_or(GachaError::Overflow)?;
-                let net = trade.amount - fee;
+                // All four fees are taken in tokens: the pot fee goes to the pot, the
+                // curve fee stays in the token reserve unpaid, the creator's and
+                // protocol's accrue in the token vault, and the rest sells.
+                let fees = self.fees_on(trade.amount)?;
+                let net = trade.amount - fees.total();
                 let out = out_given_in(y, x, net).min(self.quote_reserve as u128) as u64;
                 Ok(Priced {
                     quote: psi::QuoteResult {
@@ -591,7 +773,9 @@ impl Curve {
                         amount_out: out,
                     },
                     pot_out: 0,
-                    pot_in: fee,
+                    pot_in: fees.pot,
+                    creator_fee: fees.creator,
+                    protocol_fee: fees.protocol,
                 })
             }
         }
@@ -663,6 +847,19 @@ fn arm_ticket(info: &AccountInfo, curve: &Pubkey, trader: &Pubkey, stake: u64) -
     let mut cursor: &mut [u8] = &mut data;
     ticket.try_serialize(&mut cursor)?;
     Ok(())
+}
+
+/// Reads the upgrade authority from `UpgradeableLoaderState::ProgramData`
+/// (bincode: u32 tag 3, u64 slot, Option<Pubkey>). `Some(None)` means immutable.
+fn upgrade_authority(data: &[u8]) -> Option<Option<Pubkey>> {
+    if data.len() < 13 || data[..4] != 3u32.to_le_bytes() {
+        return None;
+    }
+    match data[12] {
+        0 => Some(None),
+        1 if data.len() >= 45 => Some(Some(Pubkey::new_from_array(data[13..45].try_into().ok()?))),
+        _ => None,
+    }
 }
 
 pub fn ticket_address(curve: &Pubkey, trader: &Pubkey) -> Pubkey {
@@ -973,6 +1170,36 @@ pub struct ResolveTicket<'info> {
     pub slot_hashes: UncheckedAccount<'info>,
 }
 
+#[derive(Accounts)]
+pub struct ClaimFees<'info> {
+    pub claimant: Signer<'info>,
+    #[account(mut, has_one = quote_mint, has_one = token_mint, has_one = quote_vault, has_one = token_vault)]
+    pub curve: Account<'info, Curve>,
+    #[account(mut)]
+    pub quote_vault: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub token_vault: InterfaceAccount<'info, TokenAccount>,
+    /// Where the quote-side fees go: any token account of the quote mint.
+    #[account(mut, token::mint = quote_mint, token::token_program = quote_token_program)]
+    pub claimant_quote: InterfaceAccount<'info, TokenAccount>,
+    /// Where the token-side fees go: any token account of the launched mint.
+    #[account(mut, token::mint = token_mint, token::token_program = token_program)]
+    pub claimant_token: InterfaceAccount<'info, TokenAccount>,
+    pub quote_mint: InterfaceAccount<'info, Mint>,
+    pub token_mint: InterfaceAccount<'info, Mint>,
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    pub token_program: Program<'info, Token>,
+    /// CHECK: this program's ProgramData, checked by address and owner; names the
+    /// upgrade authority that may claim the protocol fee.
+    #[account(
+        owner = BPF_LOADER_UPGRADEABLE,
+        seeds = [crate::ID.as_ref()],
+        bump,
+        seeds::program = BPF_LOADER_UPGRADEABLE,
+    )]
+    pub program_data: UncheckedAccount<'info>,
+}
+
 #[error_code]
 pub enum GachaError {
     #[msg("Init data is not valid InitParams")]
@@ -997,4 +1224,6 @@ pub enum GachaError {
     TooEarly,
     #[msg("Arithmetic overflow")]
     Overflow,
+    #[msg("Only the market's creator or the program's upgrade authority may claim fees")]
+    NotFeeRecipient,
 }

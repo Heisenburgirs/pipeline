@@ -2,8 +2,10 @@
 
 `programs/gacha-curve` is a Pipeline strategy that launches a token on a constant-product
 bonding curve with virtual reserves (the pump.fun shape) and adds a gacha. Every trade
-pays a small fee into a **pot** of the token, and a buyer who opts in gets a chance at a
-bonus from that pot. It is a worked example of a strategy with per-trader state and a
+pays a small fee, split between a **pot** of the token, the curve itself, the token's
+creator and the launchpad, and a buyer who opts in gets a free chance at a bonus from
+that pot. It is a launchpad: anyone creates a market on it, and the program's upgrade
+authority earns from every one. It is a worked example of a strategy with per-trader state and a
 custom action that pays out after the trade.
 
 ## The market
@@ -26,13 +28,25 @@ a sell of `t` gives `floor(x × t / (y + t))` quote, each capped at what the vau
 `virtual_quote` sets the opening price together with the supply; `virtual_token` keeps the
 price finite as the supply sells out.
 
-### The swap fee and the pot
+### Fees
 
-Every trade pays `swap_fee_bps` of its input to the pot. On a buy the fee is spent on the
-curve, as it stands after the buyer's own purchase, and the tokens it buys go to the pot
-vault. On a sell the fee is taken in tokens and moved from the token vault to the pot. The
-pot therefore only ever holds the launched token, and all trading in either direction
-funds the prizes. The buyer's or seller's own trade is priced on the rest of their input.
+Every trade pays four fees from its input and is priced on the rest. In the presets
+they add up to 0.5%, so a buyer who wants $100 of tokens sends about $100.50, plus
+Pipeline's 0.25%.
+
+| Fee | Preset | Where it goes |
+|---|---|---|
+| `pot_fee_bps` | 0.30% | The **pot**. On a buy it is spent on the curve, as it stands after the buyer's own purchase, and the tokens it buys go to the pot vault. On a sell it is taken in tokens and moved to the pot. The pot only ever holds the launched token, and all trading in either direction funds the prizes. |
+| `PROTOCOL_FEE_BPS` | 0.10% | The **launchpad**: whoever holds the program's upgrade authority. Compiled in, so a market creator cannot switch it off; it follows control of the program, and becomes unclaimable if the program is made immutable. |
+| `creator_fee_bps` | 0.05% | The market's **creator**, a wallet named at creation. At most 5%. |
+| `curve_fee_bps` | 0.05% | The **curve's reserves**: quote on a buy, tokens on a sell, with nothing paid out for it. It lifts the price a little for every holder, the way an LP fee deepens a pool. |
+
+The creator's and the launchpad's fees are taken in the input mint and accrue inside the
+market's own vaults next to the reserves, recorded in four counters on the curve account.
+Each party claims theirs with the `claim_fees` custom action, to any token account of the
+right mint. No trade depends on a recipient's account existing, so a closed wallet can
+never block trading. The quoter and the swap both see the net input, so quotes already
+reflect every fee.
 
 ### Setup data
 
@@ -43,31 +57,34 @@ funds the prizes. The buyer's or seller's own trade is priced on the rest of the
 | `supply: u64` | Tokens minted to the curve, in base units (6 decimals) |
 | `virtual_quote: u64` | Virtual quote reserve |
 | `virtual_token: u64` | Virtual token reserve |
-| `gacha_fee_bps: u16` | Fee on gacha buys, in basis points of the input |
 | `win_one_in: u32` | A gacha buy wins with probability 1 in this many |
 | `bonus_bps: u16` | Win size, in basis points of the buyer's base output |
 | `max_win_pot_bps: u16` | Cap on one win, in basis points of the pot's balance |
 | `reveal_delay_slots: u64` | Slots between a gacha buy and the slot whose block hash decides it |
-| `swap_fee_bps: u16` | Fee on every trade, in basis points of the input, paid into the pot |
+| `pot_fee_bps: u16` | Fee on every trade, in basis points of the input, paid into the pot |
+| `curve_fee_bps: u16` | Fee on every trade, left in the curve's reserves |
+| `creator_fee_bps: u16` | Fee on every trade for the creator, at most 500 |
+| `creator: Pubkey` | Who claims the creator fee |
 
 Setup accounts after the router's fixed four: quote mint, token mint (writable, signer),
 quote vault `["quote_vault", curve]`, token vault `["token_vault", curve]`, pot vault
 `["pot", curve]`, the quote mint's token program, SPL Token. The market state is the curve
 PDA `["curve", token_mint]`.
 
-Keep expected payout at or below what gacha buys put in, so the pot stays solvent on
-its own: `bonus_bps / win_one_in ≤ swap_fee_bps + gacha_fee_bps`. For example a 0.5% swap
-fee and a 2% gacha fee support a 1-in-20 chance of a 40% bonus, and plain trades only
-add to that. `max_win_pot_bps` stops a hot streak from emptying the pot.
+Opting in costs nothing, so assume every buy does and keep the expected payout at or
+below the pot fee: `bonus_bps / win_one_in ≤ pot_fee_bps`. For example a 0.3% pot fee
+supports a 1-in-100 chance of a 20% bonus (an expected 0.2%), and sells only add to the
+pot. `max_win_pot_bps` stops a hot streak from emptying it.
 
 ## A gacha buy
 
-A buy opts in by setting the first byte of the trade's `extra` to `1`. The strategy then:
+A buy opts in by setting the first byte of the trade's `extra` to `1`. It pays the same
+fees and gets the same output as a plain buy. The strategy:
 
-1. takes `swap_fee_bps + gacha_fee_bps` of the input as the fee and prices the rest on
-   the curve: that is the buyer's **base** output, and what `pipeline_quote` returns;
-2. spends the fee on the curve as it stands after the base buy, and sends what it buys to
-   the pot vault;
+1. takes the fees off the input and prices the rest on the curve: that is the buyer's
+   **base** output, and what `pipeline_quote` returns;
+2. spends the pot fee on the curve as it stands after the base buy and sends what it buys
+   to the pot vault;
 3. arms the buyer's **ticket** with the current slot and the base amount.
 
 A ticket is a PDA `["ticket", curve, trader]`, one per trader per curve. The trader opens
@@ -103,8 +120,7 @@ should resolve for their users promptly; a keeper can resolve everyone's.
 
 A roll decided inside the swap can be filtered for free. The router guarantees the trader
 at least `min_amount_out`, so a trader sets that to the jackpot amount and submits; losing
-rolls revert and cost only the transaction fee, and the gacha fee is never collected on
-them. Deciding with a block hash that does not exist yet when the buy lands closes that,
+rolls revert and cost only the transaction fee, and no fee is ever collected on them. Deciding with a block hash that does not exist yet when the buy lands closes that,
 and it keeps `pipeline_quote` and `pipeline_swap` in agreement: both return the base
 amount, and the bonus never passes through the router.
 
@@ -119,6 +135,7 @@ swap the slot hash for a VRF.
 | `open_ticket` | trader | trader (writable), curve, ticket (writable), system program |
 | `close_ticket` (unarmed only) | trader | trader (writable), ticket (writable) |
 | `resolve_ticket` | anyone | ticket (writable), curve, trader (writable), pot vault (writable), trader's token account (writable), token mint, SPL Token, SlotHashes sysvar |
+| `claim_fees` | the market's creator, or the program's upgrade authority | claimant (signer), curve (writable), quote vault (writable), token vault (writable), claimant's quote token account (writable), claimant's token account (writable), quote mint, token mint, quote token program, SPL Token, this program's ProgramData; then any transfer-hook accounts of the quote mint |
 
 Discriminators are Anchor's `sha256("global:<name>")[..8]`. The tests in
 `crates/pipeline-tests/tests/gacha.rs` build every instruction by hand and are the
@@ -139,7 +156,7 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.5% swap fee to the pot, 2% gacha fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD`](https://orbmarkets.io/address/Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD/history?cluster=devnet) |
+| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 10-slot reveal, 9-decimal test quote) | [`Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD`](https://orbmarkets.io/address/Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD/history?cluster=devnet) |
 | Demo token | `F4Tkeav4eLFkxBLqH6JUcXzYLJLjr8FSQ59s6xRMh8Nb` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the

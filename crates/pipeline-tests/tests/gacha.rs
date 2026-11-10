@@ -1,6 +1,5 @@
-//! The gacha bonding-curve strategy through the router: curve pricing, the opt-in
-//! gacha fee that funds the pot, tickets, and their resolution against a later block
-//! hash.
+//! The gacha bonding-curve strategy through the router: curve pricing, the four-way
+//! fee split, tickets, their resolution against a later block hash, and fee claims.
 
 mod common;
 
@@ -25,13 +24,18 @@ const SUPPLY: u64 = 1_000_000_000_000_000;
 const VIRTUAL_QUOTE: u64 = 30_000_000_000;
 /// 280 million tokens of virtual token reserve.
 const VIRTUAL_TOKEN: u64 = 280_000_000_000_000;
-const GACHA_FEE_BPS: u16 = 200;
-const WIN_ONE_IN: u32 = 20;
-const BONUS_BPS: u16 = 4_000;
+/// 1 in 100 wins 20% of the base output, capped at 10% of the pot: an expected 0.2%,
+/// under the 0.3% every trade pays into the pot.
+const WIN_ONE_IN: u32 = 100;
+const BONUS_BPS: u16 = 2_000;
 const MAX_WIN_POT_BPS: u16 = 1_000;
 const REVEAL_DELAY: u64 = 10;
-/// 0.5% of every trade goes to the pot.
-const SWAP_FEE_BPS: u16 = 50;
+/// Every trade pays 0.5%: 0.3% to the pot, 0.05% left in the curve, 0.05% to the
+/// market's creator and 0.1% to the program's upgrade authority (compiled in).
+const POT_FEE_BPS: u16 = 30;
+const CURVE_FEE_BPS: u16 = 5;
+const CREATOR_FEE_BPS: u16 = 5;
+const PROTOCOL_FEE_BPS: u16 = 10;
 
 /// Mirrors the strategy's `InitParams`.
 #[derive(borsh::BorshSerialize)]
@@ -39,31 +43,39 @@ struct InitParams {
     supply: u64,
     virtual_quote: u64,
     virtual_token: u64,
-    gacha_fee_bps: u16,
     win_one_in: u32,
     bonus_bps: u16,
     max_win_pot_bps: u16,
     reveal_delay_slots: u64,
-    swap_fee_bps: u16,
+    pot_fee_bps: u16,
+    curve_fee_bps: u16,
+    creator_fee_bps: u16,
+    creator: [u8; 32],
 }
 
-fn params() -> InitParams {
+fn params(creator: &Pubkey) -> InitParams {
     InitParams {
         supply: SUPPLY,
         virtual_quote: VIRTUAL_QUOTE,
         virtual_token: VIRTUAL_TOKEN,
-        gacha_fee_bps: GACHA_FEE_BPS,
         win_one_in: WIN_ONE_IN,
         bonus_bps: BONUS_BPS,
         max_win_pot_bps: MAX_WIN_POT_BPS,
         reveal_delay_slots: REVEAL_DELAY,
-        swap_fee_bps: SWAP_FEE_BPS,
+        pot_fee_bps: POT_FEE_BPS,
+        curve_fee_bps: CURVE_FEE_BPS,
+        creator_fee_bps: CREATOR_FEE_BPS,
+        creator: creator.to_bytes(),
     }
 }
 
 struct GachaMarket {
     market: Pubkey,
     curve: Pubkey,
+    /// Claims the creator fee.
+    creator: Keypair,
+    /// The program's upgrade authority, who claims the protocol fee.
+    owner: Keypair,
     quote_mint: Pubkey,
     token_mint: Pubkey,
     quote_vault: Pubkey,
@@ -89,14 +101,24 @@ fn ticket_pda(curve: &Pubkey, trader: &Pubkey) -> Pubkey {
 
 /// Registers the strategy and creates a market whose quote token is a fresh 9-decimal
 /// SPL mint. The token mint is a new keypair signing `create_market`.
-fn setup(env: &mut Env) -> GachaMarket {
+/// Registers the program once, returning its upgrade authority; later markets in the
+/// same environment get a fresh authority installed instead.
+fn register(env: &mut Env) -> Keypair {
     if env
         .svm
         .get_account(&pda::strategy(&GACHA_PROGRAM_ID))
         .is_none()
     {
-        env.register(&GACHA_PROGRAM_ID, "gacha_curve");
+        return env.register(&GACHA_PROGRAM_ID, "gacha_curve");
     }
+    let owner = env.funded_keypair();
+    set_upgrade_authority(&mut env.svm, &GACHA_PROGRAM_ID, Some(&owner.pubkey()));
+    owner
+}
+
+fn setup(env: &mut Env) -> GachaMarket {
+    let owner = register(env);
+    let creator = env.funded_keypair();
     let quote_mint = env.create_mint(&TOKEN, 9, None, None);
     let token_mint = Keypair::new();
     let curve = curve_pda(&token_mint.pubkey());
@@ -104,13 +126,12 @@ fn setup(env: &mut Env) -> GachaMarket {
     let token_vault = curve_child(b"token_vault", &curve);
     let pot_vault = curve_child(b"pot", &curve);
 
-    let creator = env.funded_keypair();
     let ix = client::create_market(&client::CreateMarket {
         creator: creator.pubkey(),
         strategy_program: GACHA_PROGRAM_ID,
         market_state: curve,
         market_state_signs: false,
-        init_data: borsh::to_vec(&params()).unwrap(),
+        init_data: borsh::to_vec(&params(&creator.pubkey())).unwrap(),
         max_creator_lamports: MAX_SETUP_LAMPORTS,
         strategy_accounts: vec![
             AccountMeta::new_readonly(quote_mint, false),
@@ -139,6 +160,8 @@ fn setup(env: &mut Env) -> GachaMarket {
     GachaMarket {
         market,
         curve,
+        creator,
+        owner,
         quote_mint,
         token_mint: token_mint.pubkey(),
         quote_vault,
@@ -169,26 +192,60 @@ fn curve_out(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u64 {
     (reserve_out * amount_in as u128 / (reserve_in + amount_in as u128)) as u64
 }
 
-/// What a buy of `amount` gives the trader, and what its fees buy for the pot.
-fn price_buy(env: &Env, m: &GachaMarket, amount: u64, gacha: bool) -> (u64, u64) {
+/// Unclaimed fees: `(creator quote, creator token, protocol quote, protocol token)`.
+fn owed(env: &Env, m: &GachaMarket) -> (u64, u64, u64, u64) {
+    let data = env.account_data(&m.curve);
+    let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
+    // ... reveal_delay_slots ends at 216, three u16 fees and the creator key follow.
+    (at(254), at(262), at(270), at(278))
+}
+
+/// The four fees on an input of `amount`: `(pot, curve, creator, protocol)`.
+fn fees_on(amount: u64) -> (u64, u64, u64, u64) {
+    let bps = |rate: u16| fees::ceil_bps(amount, rate as u64).unwrap();
+    (
+        bps(POT_FEE_BPS),
+        bps(CURVE_FEE_BPS),
+        bps(CREATOR_FEE_BPS),
+        bps(PROTOCOL_FEE_BPS),
+    )
+}
+
+/// What is left of an input after all four fees.
+fn net_in(amount: u64) -> u64 {
+    let (pot, curve, creator, protocol) = fees_on(amount);
+    amount - pot - curve - creator - protocol
+}
+
+/// The creator's plus the protocol's fee: what leaves the reserves for claiming.
+fn claimable(amount: u64) -> u64 {
+    let (_, _, creator, protocol) = fees_on(amount);
+    creator + protocol
+}
+
+/// What a buy of `amount` gives the trader, and what its pot fee buys for the pot. A
+/// gacha buy is priced exactly like a plain one.
+fn price_buy(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     let (quote_reserve, token_reserve) = reserves(env, m);
     let x = VIRTUAL_QUOTE as u128 + quote_reserve as u128;
     let y = VIRTUAL_TOKEN as u128 + token_reserve as u128;
-    let fee_bps = SWAP_FEE_BPS as u64 + if gacha { GACHA_FEE_BPS as u64 } else { 0 };
-    let fee = fees::ceil_bps(amount, fee_bps).unwrap();
-    let base = curve_out(x, y, amount - fee).min(token_reserve);
+    let net = net_in(amount);
+    let base = curve_out(x, y, net).min(token_reserve);
     let pot =
-        curve_out(x + (amount - fee) as u128, y - base as u128, fee).min(token_reserve - base);
+        curve_out(x + net as u128, y - base as u128, fees_on(amount).0).min(token_reserve - base);
     (base, pot)
 }
 
-/// What a sell of `amount` pays, and the fee in tokens that goes to the pot.
+/// What a sell of `amount` pays, and the pot fee in tokens. The curve fee in tokens
+/// stays in the reserve; the creator's and protocol's accrue in the vault.
 fn price_sell(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     let (quote_reserve, token_reserve) = reserves(env, m);
     let x = VIRTUAL_QUOTE as u128 + quote_reserve as u128;
     let y = VIRTUAL_TOKEN as u128 + token_reserve as u128;
-    let fee = fees::ceil_bps(amount, SWAP_FEE_BPS as u64).unwrap();
-    (curve_out(y, x, amount - fee).min(quote_reserve), fee)
+    (
+        curve_out(y, x, net_in(amount)).min(quote_reserve),
+        fees_on(amount).0,
+    )
 }
 
 fn swap_accounts(
@@ -271,6 +328,38 @@ fn close_ticket_ix(m: &GachaMarket, trader: &Pubkey) -> Instruction {
     )
 }
 
+/// The associated token account, created if it does not exist yet.
+fn ata_for(env: &mut Env, owner: &Pubkey, mint: &Pubkey) -> Pubkey {
+    let address = pda::associated_token(owner, mint, &TOKEN);
+    if env.svm.get_account(&address).is_none() {
+        env.create_ata(owner, mint, &TOKEN);
+    }
+    address
+}
+
+/// `claim_fees` by `claimant`, paid to their associated token accounts.
+fn claim_fees_ix(env: &mut Env, m: &GachaMarket, claimant: &Pubkey) -> Instruction {
+    let claimant_quote = ata_for(env, claimant, &m.quote_mint);
+    let claimant_token = ata_for(env, claimant, &m.token_mint);
+    Instruction::new_with_bytes(
+        GACHA_PROGRAM_ID,
+        &client::instruction_discriminator("claim_fees"),
+        vec![
+            AccountMeta::new_readonly(*claimant, true),
+            AccountMeta::new(m.curve, false),
+            AccountMeta::new(m.quote_vault, false),
+            AccountMeta::new(m.token_vault, false),
+            AccountMeta::new(claimant_quote, false),
+            AccountMeta::new(claimant_token, false),
+            AccountMeta::new_readonly(m.quote_mint, false),
+            AccountMeta::new_readonly(m.token_mint, false),
+            AccountMeta::new_readonly(TOKEN, false),
+            AccountMeta::new_readonly(TOKEN, false),
+            AccountMeta::new_readonly(pda::program_data(&GACHA_PROGRAM_ID), false),
+        ],
+    )
+}
+
 fn resolve_ticket_ix(m: &GachaMarket, trader: &Pubkey, trader_token: &Pubkey) -> Instruction {
     Instruction::new_with_bytes(
         GACHA_PROGRAM_ID,
@@ -303,7 +392,7 @@ fn gacha_buy(
     t: &(Keypair, Pubkey, Pubkey),
     amount: u64,
 ) -> (u64, u64) {
-    let (base, pot) = price_buy(env, m, amount, true);
+    let (base, pot) = price_buy(env, m, amount);
     let accounts = swap_accounts(m, &t.0.pubkey(), true, true, &t.1, &t.2);
     env.send(
         &[
@@ -447,17 +536,21 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     let t = trader(&mut env, &m, 20_000_000_000);
     let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
 
-    // Buy 1 quote unit (1e9) on the fresh curve: 0.5% of it buys for the pot.
+    // Buy 1 quote unit (1e9) on the fresh curve: 0.3% of it buys for the pot, 0.05%
+    // stays in the curve, 0.05% and 0.1% accrue for the creator and the protocol.
     let amount = 1_000_000_000;
-    let (expected, pot) = price_buy(&env, &m, amount, false);
-    let fee = fees::ceil_bps(amount, SWAP_FEE_BPS as u64).unwrap();
-    assert_eq!(fee, 5_000_000);
+    let (expected, pot) = price_buy(&env, &m, amount);
+    let (pot_fee, curve_fee, creator_fee, protocol_fee) = fees_on(amount);
+    assert_eq!(
+        (pot_fee, curve_fee, creator_fee, protocol_fee),
+        (3_000_000, 500_000, 500_000, 1_000_000)
+    );
     assert_eq!(
         expected,
         curve_out(
             VIRTUAL_QUOTE as u128,
             (VIRTUAL_TOKEN + SUPPLY) as u128,
-            amount - fee
+            net_in(amount)
         )
     );
     assert!(pot > 0 && pot < expected / 100);
@@ -490,7 +583,12 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
         env.token_balance(&trader_quote),
         20_000_000_000 - amount - fees::pipeline_fee(amount)
     );
-    assert_eq!(reserves(&env, &m), (amount, SUPPLY - expected - pot));
+    assert_eq!(
+        reserves(&env, &m),
+        (amount - claimable(amount), SUPPLY - expected - pot)
+    );
+    assert_eq!(owed(&env, &m), (creator_fee, 0, protocol_fee, 0));
+    assert_eq!(env.token_balance(&m.quote_vault), amount);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
     let event = &swap_events(&meta)[0];
     assert_eq!((event.net_sent, event.received), (amount, expected));
@@ -500,7 +598,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     let sell = expected / 2;
     let (expected_quote, sell_fee) = price_sell(&env, &m, sell);
     assert!(expected_quote > 0 && expected_quote < amount);
-    assert_eq!(sell_fee, fees::ceil_bps(sell, SWAP_FEE_BPS as u64).unwrap());
+    assert_eq!(sell_fee, fees_on(sell).0);
     let mut quoter = quoter_for(&env, &m, &[]);
     let request = quote_request(&m, false, sell, None, vec![]);
     let resolved = quoter
@@ -530,9 +628,14 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     assert_eq!(
         reserves(&env, &m),
         (
-            amount - expected_quote,
-            SUPPLY - expected - pot + sell - sell_fee
+            amount - claimable(amount) - expected_quote,
+            SUPPLY - expected - pot + sell - sell_fee - claimable(sell)
         )
+    );
+    let (_, _, sell_creator, sell_protocol) = fees_on(sell);
+    assert_eq!(
+        owed(&env, &m),
+        (creator_fee, sell_creator, protocol_fee, sell_protocol)
     );
     assert_eq!(env.token_balance(&m.pot_vault), pot + sell_fee);
     assert_eq!(
@@ -563,16 +666,13 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     let ticket_key = ticket_pda(&m.curve, &trader_key);
 
     let amount = 2_000_000_000;
-    let fee = fees::ceil_bps(amount, GACHA_FEE_BPS as u64).unwrap();
-    let (base, pot) = price_buy(&env, &m, amount, true);
-    assert_eq!(fee, 40_000_000);
+    let (base, pot) = price_buy(&env, &m, amount);
     assert!(pot > 0 && pot < base);
-    // The gacha buyer gets less than a plain buyer of the same amount, the gacha fee's
-    // share; what leaves the curve in total is the same either way (up to rounding),
-    // since the pot buys with the fee.
-    let (plain, plain_pot) = price_buy(&env, &m, amount, false);
-    assert!(base < plain);
-    assert!((base + pot).abs_diff(plain + plain_pot) <= 2);
+    // Opting in costs nothing: the same four fees as a plain buy, the same base output.
+    assert_eq!(
+        fees_on(amount),
+        (6_000_000, 1_000_000, 1_000_000, 2_000_000)
+    );
 
     // The quoter resolves the pot and the trader's ticket, and quotes the base amount.
     let mut quoter = quoter_for(&env, &m, &[]);
@@ -619,12 +719,15 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     assert_eq!((got_base, got_pot), (base, pot));
     assert_eq!(env.token_balance(&trader_token), base);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
-    // Pipeline's fee is charged on the whole input, gacha fee included.
+    // Pipeline's fee is charged on the whole input, the curve's fees included.
     assert_eq!(
         env.token_balance(&trader_quote),
         20_000_000_000 - amount - fees::pipeline_fee(amount)
     );
-    assert_eq!(reserves(&env, &m), (amount, SUPPLY - base - pot));
+    assert_eq!(
+        reserves(&env, &m),
+        (amount - claimable(amount), SUPPLY - base - pot)
+    );
     assert_eq!(ticket(&env, &ticket_key), Some((true, slot, base)));
 
     // A second gacha buy must wait for the ticket; plain buys still work.
@@ -633,7 +736,7 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
         env.send(&[client::swap(&accounts, &gacha_args(amount, 0))], &[&t.0]),
         "TicketPending",
     );
-    let (plain, _) = price_buy(&env, &m, amount, false);
+    let (plain, _) = price_buy(&env, &m, amount);
     let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
     env.send(
         &[client::swap(&accounts, &exact_in(amount, plain))],
@@ -807,6 +910,86 @@ fn tickets_left_past_the_resolve_window_expire_without_a_payout() {
     assert_eq!(env.token_balance(&trader_token), stake);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
     assert_eq!(ticket(&env, &ticket_key), None);
+}
+
+#[test]
+fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_launchpad() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    let t = trader(&mut env, &m, 20_000_000_000);
+    let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
+
+    // A buy and a sell leave fees in both mints.
+    let amount = 5_000_000_000;
+    let (got, _) = price_buy(&env, &m, amount);
+    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    env.send(&[client::swap(&accounts, &exact_in(amount, got))], &[&t.0])
+        .expect("buy");
+    let sold = got / 2;
+    let (back, _) = price_sell(&env, &m, sold);
+    let accounts = swap_accounts(&m, &trader_key, false, false, &trader_quote, &trader_token);
+    env.send(&[client::swap(&accounts, &exact_in(sold, back))], &[&t.0])
+        .expect("sell");
+    let (creator_quote, creator_token, protocol_quote, protocol_token) = owed(&env, &m);
+    assert_eq!(
+        (creator_quote, protocol_quote),
+        (fees_on(amount).2, fees_on(amount).3)
+    );
+    assert_eq!(
+        (creator_token, protocol_token),
+        (fees_on(sold).2, fees_on(sold).3)
+    );
+    assert!(protocol_quote == 2 * creator_quote);
+
+    // A stranger cannot claim.
+    let stranger = env.funded_keypair();
+    let ix = claim_fees_ix(&mut env, &m, &stranger.pubkey());
+    assert_fails_with(env.send(&[ix], &[&stranger]), "NotFeeRecipient");
+
+    // The creator claims the 0.05% side; the launchpad's share stays put.
+    let creator = m.creator.pubkey();
+    let ix = claim_fees_ix(&mut env, &m, &creator);
+    env.send(&[ix], &[&m.creator]).expect("creator claims");
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&creator, &m.quote_mint, &TOKEN)),
+        creator_quote
+    );
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&creator, &m.token_mint, &TOKEN)),
+        creator_token
+    );
+    assert_eq!(owed(&env, &m), (0, 0, protocol_quote, protocol_token));
+
+    // The program's upgrade authority, the launchpad, claims the 0.1% side.
+    let owner = m.owner.pubkey();
+    let ix = claim_fees_ix(&mut env, &m, &owner);
+    env.send(&[ix], &[&m.owner]).expect("launchpad claims");
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&owner, &m.quote_mint, &TOKEN)),
+        protocol_quote
+    );
+    assert_eq!(
+        env.token_balance(&pda::associated_token(&owner, &m.token_mint, &TOKEN)),
+        protocol_token
+    );
+    assert_eq!(owed(&env, &m), (0, 0, 0, 0));
+
+    // Claims never touch the reserves or the pot, and trading continues on them.
+    let (quote_reserve, token_reserve) = reserves(&env, &m);
+    assert_eq!(env.token_balance(&m.quote_vault), quote_reserve);
+    assert_eq!(env.token_balance(&m.token_vault), token_reserve);
+    let (got, _) = price_buy(&env, &m, 1_000_000_000);
+    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    env.send(
+        &[client::swap(&accounts, &exact_in(1_000_000_000, got))],
+        &[&t.0],
+    )
+    .expect("buy after claims");
+
+    // Once the program is made immutable, nobody can claim the launchpad side.
+    set_upgrade_authority(&mut env.svm, &GACHA_PROGRAM_ID, None);
+    let ix = claim_fees_ix(&mut env, &m, &owner);
+    assert_fails_with(env.send(&[ix], &[&m.owner]), "NotFeeRecipient");
 }
 
 #[test]
