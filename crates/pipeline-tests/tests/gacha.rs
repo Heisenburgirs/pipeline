@@ -1,6 +1,6 @@
 //! The gacha bonding-curve strategy through the router: curve pricing, the four-way
-//! fee split, tickets, their resolution against ORAO VRF randomness (simulated here by
-//! writing fulfilled randomness accounts), and fee claims.
+//! fee split, packs of draws, their opening against ORAO VRF randomness (simulated here
+//! by writing fulfilled randomness accounts), and fee claims.
 
 mod common;
 
@@ -18,6 +18,8 @@ const GACHA_PROGRAM_ID: Pubkey = client::pubkey!("2TmcmquxnCB8AHoLmLJFYxZnVQdm9p
 const ORAO_VRF: Pubkey = client::pubkey!("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 /// sha256("account:RandomnessV2")[..8].
 const RANDOMNESS_V2_DISCRIMINATOR: [u8; 8] = [139, 239, 184, 215, 227, 86, 191, 226];
+/// Draws a pack holds.
+const PACK_DRAWS: usize = 16;
 
 /// One billion tokens with 6 decimals.
 const SUPPLY: u64 = 1_000_000_000_000_000;
@@ -30,8 +32,8 @@ const VIRTUAL_TOKEN: u64 = 280_000_000_000_000;
 const WIN_ONE_IN: u32 = 100;
 const BONUS_BPS: u16 = 2_000;
 const MAX_WIN_POT_BPS: u16 = 1_000;
-/// A ticket must be resolved within this many slots of its buy.
-const RESOLVE_WINDOW: u64 = 400;
+/// Draws opened within this many slots of their buy are capped by the pot as it is.
+const FRESH_WINDOW: u64 = 400;
 /// Every trade pays 0.5%: 0.3% to the pot, 0.05% left in the curve, 0.05% to the
 /// market's creator and 0.1% to the program's upgrade authority (compiled in).
 const POT_FEE_BPS: u16 = 30;
@@ -53,7 +55,7 @@ struct InitParams {
     win_one_in: u32,
     bonus_bps: u16,
     max_win_pot_bps: u16,
-    resolve_window_slots: u64,
+    fresh_window_slots: u64,
     pot_fee_bps: u16,
     curve_fee_bps: u16,
     creator_fee_bps: u16,
@@ -71,7 +73,7 @@ fn params(creator: &Pubkey) -> InitParams {
         win_one_in: WIN_ONE_IN,
         bonus_bps: BONUS_BPS,
         max_win_pot_bps: MAX_WIN_POT_BPS,
-        resolve_window_slots: RESOLVE_WINDOW,
+        fresh_window_slots: FRESH_WINDOW,
         pot_fee_bps: POT_FEE_BPS,
         curve_fee_bps: CURVE_FEE_BPS,
         creator_fee_bps: CREATOR_FEE_BPS,
@@ -104,16 +106,19 @@ fn curve_child(seed: &[u8], curve: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[seed, curve.as_ref()], &GACHA_PROGRAM_ID).0
 }
 
-fn ticket_pda(curve: &Pubkey, trader: &Pubkey) -> Pubkey {
+fn pack_pda(curve: &Pubkey, trader: &Pubkey, index: u16) -> Pubkey {
     Pubkey::find_program_address(
-        &[b"ticket", curve.as_ref(), trader.as_ref()],
+        &[
+            b"pack",
+            curve.as_ref(),
+            trader.as_ref(),
+            &index.to_le_bytes(),
+        ],
         &GACHA_PROGRAM_ID,
     )
     .0
 }
 
-/// Registers the strategy and creates a market whose quote token is a fresh 9-decimal
-/// SPL mint. The token mint is a new keypair signing `create_market`.
 /// Registers the program once, returning its upgrade authority; later markets in the
 /// same environment get a fresh authority installed instead.
 fn register(env: &mut Env) -> Keypair {
@@ -129,6 +134,8 @@ fn register(env: &mut Env) -> Keypair {
     owner
 }
 
+/// Registers the strategy and creates a market whose quote token is a fresh 9-decimal
+/// SPL mint. The token mint is a new keypair signing `create_market`.
 fn setup(env: &mut Env) -> GachaMarket {
     let owner = register(env);
     let creator = env.funded_keypair();
@@ -190,27 +197,124 @@ fn reserves(env: &Env, m: &GachaMarket) -> (u64, u64) {
     (at(8 + 160), at(8 + 168))
 }
 
-/// `(armed, slot, stake)` of a ticket, or `None` if the account is closed.
-fn ticket(env: &Env, address: &Pubkey) -> Option<(bool, u64, u64)> {
+/// Unclaimed fees: `(creator quote, creator token, protocol quote, protocol token)`.
+fn owed(env: &Env, m: &GachaMarket) -> (u64, u64, u64, u64) {
+    let data = env.account_data(&m.curve);
+    let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
+    // ... fresh_window_slots ends at 216, three u16 fees and the creator key follow.
+    (at(254), at(262), at(270), at(278))
+}
+
+/// How many packs the curve has opened: the next one gets this plus one as nonce.
+fn curve_pack_nonce(env: &Env, m: &GachaMarket) -> u64 {
+    let data = env.account_data(&m.curve);
+    u64::from_le_bytes(data[296..304].try_into().unwrap())
+}
+
+/// `(index, nonce, draws, opened)` of a pack, or `None` if the account is closed.
+fn pack(env: &Env, address: &Pubkey) -> Option<(u16, u64, u8, u8)> {
     let data = env.account_data(address);
-    if data.len() < 8 + 32 + 32 + 1 + 8 + 8 + 1 {
+    if data.len() < 84 {
         return None;
     }
+    Some((
+        u16::from_le_bytes(data[72..74].try_into().unwrap()),
+        u64::from_le_bytes(data[74..82].try_into().unwrap()),
+        data[82],
+        data[83],
+    ))
+}
+
+/// `(state, stake, pot_at_buy, slot, seed)` of draw `i` of a pack.
+fn draw(env: &Env, address: &Pubkey, i: u8) -> (u8, u64, u64, u64, [u8; 32]) {
+    let data = env.account_data(address);
+    let base = 84 + 57 * i as usize;
     let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
-    Some((data[72] == 1, at(73), at(81)))
+    (
+        data[base],
+        at(base + 1),
+        at(base + 9),
+        at(base + 17),
+        data[base + 25..base + 57].try_into().unwrap(),
+    )
+}
+
+const DRAW_ARMED: u8 = 1;
+const DRAW_OPENED: u8 = 2;
+
+/// The strategy's seed for draw `index` of a pack opened with `nonce`, mirrored.
+fn draw_seed(pack: &Pubkey, nonce: u64, index: u8) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"gacha-vrf")
+        .chain_update(pack.as_ref())
+        .chain_update(nonce.to_le_bytes())
+        .chain_update([index])
+        .finalize()
+        .into()
+}
+
+/// ORAO's randomness request account for a seed.
+fn randomness_pda(seed: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"orao-vrf-randomness-request", seed], &ORAO_VRF).0
+}
+
+/// The seed a buy by `trader` into pack `index` will arm: the pack's next draw, or draw
+/// 0 of a pack about to be opened with the curve's next nonce.
+fn next_seed(env: &Env, m: &GachaMarket, trader: &Pubkey, index: u16) -> [u8; 32] {
+    let pack_key = pack_pda(&m.curve, trader, index);
+    let (nonce, draws) = match pack(env, &pack_key) {
+        Some((_, nonce, draws, _)) => (nonce, draws),
+        None => (curve_pack_nonce(env, m) + 1, 0),
+    };
+    draw_seed(&pack_key, nonce, draws)
+}
+
+/// The randomness account a buy into pack `index` must pass (see `next_seed`).
+fn next_randomness(env: &Env, m: &GachaMarket, trader: &Pubkey, index: u16) -> Pubkey {
+    randomness_pda(&next_seed(env, m, trader, index))
+}
+
+/// Writes an ORAO `RandomnessV2` account for `seed`, pending or fulfilled with
+/// `randomness`, as the oracles would.
+fn write_randomness(env: &mut Env, seed: &[u8; 32], randomness: Option<&[u8; 64]>) {
+    let mut data = RANDOMNESS_V2_DISCRIMINATOR.to_vec();
+    match randomness {
+        None => {
+            data.push(0);
+            data.extend_from_slice(&[0u8; 32]);
+            data.extend_from_slice(seed);
+            data.extend_from_slice(&0u32.to_le_bytes());
+        }
+        Some(randomness) => {
+            data.push(1);
+            data.extend_from_slice(&[0u8; 32]);
+            data.extend_from_slice(seed);
+            data.extend_from_slice(randomness);
+        }
+    }
+    env.svm
+        .set_account(
+            randomness_pda(seed),
+            Account {
+                lamports: 10_000_000,
+                data,
+                owner: ORAO_VRF,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+}
+
+/// Fulfils draw `i` of a pack with randomness of the wanted tier.
+fn fulfil(env: &mut Env, pack_key: &Pubkey, i: u8, want: u8) {
+    let (_, _, _, _, seed) = draw(env, pack_key, i);
+    write_randomness(env, &seed, Some(&randomness_that(want)));
 }
 
 /// The curve's pricing: `floor(reserve_out × in / (reserve_in + in))`.
 fn curve_out(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u64 {
     (reserve_out * amount_in as u128 / (reserve_in + amount_in as u128)) as u64
-}
-
-/// Unclaimed fees: `(creator quote, creator token, protocol quote, protocol token)`.
-fn owed(env: &Env, m: &GachaMarket) -> (u64, u64, u64, u64) {
-    let data = env.account_data(&m.curve);
-    let at = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
-    // ... reveal_delay_slots ends at 216, three u16 fees and the creator key follow.
-    (at(254), at(262), at(270), at(278))
 }
 
 /// The four fees on an input of `amount`: `(pot, curve, creator, protocol)`.
@@ -237,7 +341,7 @@ fn claimable(amount: u64) -> u64 {
 }
 
 /// What a buy of `amount` gives the trader, and what its pot fee buys for the pot. A
-/// gacha buy is priced exactly like a plain one.
+/// buy into a pack is priced exactly like a plain one.
 fn price_buy(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     let (quote_reserve, token_reserve) = reserves(env, m);
     let x = VIRTUAL_QUOTE as u128 + quote_reserve as u128;
@@ -261,13 +365,13 @@ fn price_sell(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     )
 }
 
-/// Swap accounts; `gacha` is the randomness account of the ticket's next round for a
-/// gacha buy (see `next_randomness`), `None` for a plain trade.
+/// Swap accounts; `pack` is `(index, randomness account of its next draw)` for a buy
+/// into a pack (see `next_randomness`), `None` for a plain trade.
 fn swap_accounts(
     m: &GachaMarket,
     trader: &Pubkey,
     buy: bool,
-    gacha: Option<Pubkey>,
+    pack: Option<(u16, Pubkey)>,
     trader_quote: &Pubkey,
     trader_token: &Pubkey,
 ) -> client::SwapAccounts {
@@ -275,8 +379,8 @@ fn swap_accounts(
         AccountMeta::new(if buy { m.token_vault } else { m.quote_vault }, false),
         AccountMeta::new(m.pot_vault, false),
     ];
-    if let Some(randomness) = gacha {
-        strategy_accounts.push(AccountMeta::new(ticket_pda(&m.curve, trader), false));
+    if let Some((index, randomness)) = pack {
+        strategy_accounts.push(AccountMeta::new(pack_pda(&m.curve, trader, index), false));
         strategy_accounts.push(AccountMeta::new_readonly(randomness, false));
     }
     let (input_mint, output_mint, trader_input, trader_output, input_vault) = if buy {
@@ -313,33 +417,69 @@ fn swap_accounts(
     }
 }
 
-fn gacha_args(amount_in: u64, min_amount_out: u64) -> client::SwapArgs {
+/// Exact-in arguments for a buy into pack `index`.
+fn pack_args(amount_in: u64, min_amount_out: u64, index: u16) -> client::SwapArgs {
     client::SwapArgs {
-        extra: vec![1],
+        extra: index.to_le_bytes().to_vec(),
         ..exact_in(amount_in, min_amount_out)
     }
 }
 
-fn open_ticket_ix(m: &GachaMarket, trader: &Pubkey) -> Instruction {
+fn open_pack_ix(m: &GachaMarket, trader: &Pubkey, index: u16) -> Instruction {
+    let mut data = client::instruction_discriminator("open_pack").to_vec();
+    data.extend_from_slice(&index.to_le_bytes());
     Instruction::new_with_bytes(
         GACHA_PROGRAM_ID,
-        &client::instruction_discriminator("open_ticket"),
+        &data,
         vec![
             AccountMeta::new(*trader, true),
             AccountMeta::new(m.curve, false),
-            AccountMeta::new(ticket_pda(&m.curve, trader), false),
+            AccountMeta::new(pack_pda(&m.curve, trader, index), false),
             AccountMeta::new_readonly(client::SYSTEM_PROGRAM_ID, false),
         ],
     )
 }
 
-fn close_ticket_ix(m: &GachaMarket, trader: &Pubkey) -> Instruction {
+fn close_pack_ix(m: &GachaMarket, trader: &Pubkey, index: u16) -> Instruction {
     Instruction::new_with_bytes(
         GACHA_PROGRAM_ID,
-        &client::instruction_discriminator("close_ticket"),
+        &client::instruction_discriminator("close_pack"),
         vec![
             AccountMeta::new(*trader, true),
-            AccountMeta::new(ticket_pda(&m.curve, trader), false),
+            AccountMeta::new(pack_pda(&m.curve, trader, index), false),
+        ],
+    )
+}
+
+/// `open_draw` for draw `i` of the trader's pack `index`, paid to `trader_token`.
+fn open_draw_ix(
+    env: &Env,
+    m: &GachaMarket,
+    trader: &Pubkey,
+    index: u16,
+    i: u8,
+    trader_token: &Pubkey,
+) -> Instruction {
+    let pack_key = pack_pda(&m.curve, trader, index);
+    let randomness = if pack(env, &pack_key).is_some() && (i as usize) < PACK_DRAWS {
+        randomness_pda(&draw(env, &pack_key, i).4)
+    } else {
+        Pubkey::new_unique()
+    };
+    let mut data = client::instruction_discriminator("open_draw").to_vec();
+    data.push(i);
+    Instruction::new_with_bytes(
+        GACHA_PROGRAM_ID,
+        &data,
+        vec![
+            AccountMeta::new(pack_key, false),
+            AccountMeta::new_readonly(m.curve, false),
+            AccountMeta::new_readonly(*trader, false),
+            AccountMeta::new(m.pot_vault, false),
+            AccountMeta::new(*trader_token, false),
+            AccountMeta::new_readonly(m.token_mint, false),
+            AccountMeta::new_readonly(TOKEN, false),
+            AccountMeta::new_readonly(randomness, false),
         ],
     )
 }
@@ -376,123 +516,6 @@ fn claim_fees_ix(env: &mut Env, m: &GachaMarket, claimant: &Pubkey) -> Instructi
     )
 }
 
-/// The strategy's seed for the `round`-th gacha buy of a ticket opened with `nonce`,
-/// mirrored.
-fn ticket_seed(ticket: &Pubkey, nonce: u64, round: u32) -> [u8; 32] {
-    Sha256::new()
-        .chain_update(b"gacha-vrf")
-        .chain_update(ticket.as_ref())
-        .chain_update(nonce.to_le_bytes())
-        .chain_update(round.to_le_bytes())
-        .finalize()
-        .into()
-}
-
-/// How many tickets the curve has opened: the next one gets this plus one as nonce.
-fn curve_ticket_nonce(env: &Env, m: &GachaMarket) -> u64 {
-    let data = env.account_data(&m.curve);
-    u64::from_le_bytes(data[296..304].try_into().unwrap())
-}
-
-/// ORAO's randomness request account for a seed.
-fn randomness_pda(seed: &[u8; 32]) -> Pubkey {
-    Pubkey::find_program_address(&[b"orao-vrf-randomness-request", seed], &ORAO_VRF).0
-}
-
-/// `(rounds, seed, nonce)` of a ticket.
-fn ticket_round(env: &Env, address: &Pubkey) -> (u32, [u8; 32], u64) {
-    let data = env.account_data(address);
-    (
-        u32::from_le_bytes(data[89..93].try_into().unwrap()),
-        data[93..125].try_into().unwrap(),
-        u64::from_le_bytes(data[125..133].try_into().unwrap()),
-    )
-}
-
-/// The seed a gacha buy by `trader` will arm: the ticket's next round, or round 1 of a
-/// ticket about to be opened with the curve's next nonce.
-fn next_seed(env: &Env, m: &GachaMarket, trader: &Pubkey) -> [u8; 32] {
-    let ticket_key = ticket_pda(&m.curve, trader);
-    let (nonce, rounds) = if env.svm.get_account(&ticket_key).is_some() {
-        let (rounds, _, nonce) = ticket_round(env, &ticket_key);
-        (nonce, rounds)
-    } else {
-        (curve_ticket_nonce(env, m) + 1, 0)
-    };
-    ticket_seed(&ticket_key, nonce, rounds + 1)
-}
-
-/// The randomness account a gacha buy by `trader` must pass (see `next_seed`).
-fn next_randomness(env: &Env, m: &GachaMarket, trader: &Pubkey) -> Pubkey {
-    randomness_pda(&next_seed(env, m, trader))
-}
-
-/// Writes an ORAO `RandomnessV2` account for `seed`, pending or fulfilled with
-/// `randomness`, as the oracles would.
-fn write_randomness(env: &mut Env, seed: &[u8; 32], randomness: Option<&[u8; 64]>) {
-    let mut data = RANDOMNESS_V2_DISCRIMINATOR.to_vec();
-    match randomness {
-        None => {
-            data.push(0);
-            data.extend_from_slice(&[0u8; 32]);
-            data.extend_from_slice(seed);
-            data.extend_from_slice(&0u32.to_le_bytes());
-        }
-        Some(randomness) => {
-            data.push(1);
-            data.extend_from_slice(&[0u8; 32]);
-            data.extend_from_slice(seed);
-            data.extend_from_slice(randomness);
-        }
-    }
-    env.svm
-        .set_account(
-            randomness_pda(seed),
-            Account {
-                lamports: 10_000_000,
-                data,
-                owner: ORAO_VRF,
-                executable: false,
-                rent_epoch: 0,
-            },
-        )
-        .unwrap();
-}
-
-/// Fulfils the ticket's current seed with randomness of the wanted tier.
-fn fulfil(env: &mut Env, ticket_key: &Pubkey, want: u8) {
-    let (_, seed, _) = ticket_round(env, ticket_key);
-    write_randomness(env, &seed, Some(&randomness_that(want)));
-}
-
-fn resolve_ticket_ix(
-    env: &Env,
-    m: &GachaMarket,
-    trader: &Pubkey,
-    trader_token: &Pubkey,
-) -> Instruction {
-    let ticket_key = ticket_pda(&m.curve, trader);
-    let randomness = if env.svm.get_account(&ticket_key).is_some() {
-        randomness_pda(&ticket_round(env, &ticket_key).1)
-    } else {
-        Pubkey::new_unique()
-    };
-    Instruction::new_with_bytes(
-        GACHA_PROGRAM_ID,
-        &client::instruction_discriminator("resolve_ticket"),
-        vec![
-            AccountMeta::new(ticket_key, false),
-            AccountMeta::new_readonly(m.curve, false),
-            AccountMeta::new(*trader, false),
-            AccountMeta::new(m.pot_vault, false),
-            AccountMeta::new(*trader_token, false),
-            AccountMeta::new_readonly(m.token_mint, false),
-            AccountMeta::new_readonly(TOKEN, false),
-            AccountMeta::new_readonly(randomness, false),
-        ],
-    )
-}
-
 /// A funded trader holding `quote` of the quote token, with an empty token account.
 fn trader(env: &mut Env, m: &GachaMarket, quote: u64) -> (Keypair, Pubkey, Pubkey) {
     let (trader, trader_quote) = env.trader_with(&m.quote_mint, &TOKEN, quote);
@@ -500,25 +523,26 @@ fn trader(env: &mut Env, m: &GachaMarket, quote: u64) -> (Keypair, Pubkey, Pubke
     (trader, trader_quote, trader_token)
 }
 
-/// Buys `amount` with the gacha, in one transaction with `open_ticket`. Returns the
-/// trader's base output and what the pot received.
-fn gacha_buy(
+/// Buys `amount` into the trader's pack `index`, opening the pack first in the same
+/// transaction if it does not exist. Returns the trader's base output and what the pot
+/// received.
+fn pack_buy(
     env: &mut Env,
     m: &GachaMarket,
     t: &(Keypair, Pubkey, Pubkey),
+    index: u16,
     amount: u64,
 ) -> (u64, u64) {
+    let trader_key = t.0.pubkey();
     let (base, pot) = price_buy(env, m, amount);
-    let randomness = next_randomness(env, m, &t.0.pubkey());
-    let accounts = swap_accounts(m, &t.0.pubkey(), true, Some(randomness), &t.1, &t.2);
-    env.send(
-        &[
-            open_ticket_ix(m, &t.0.pubkey()),
-            client::swap(&accounts, &gacha_args(amount, base)),
-        ],
-        &[&t.0],
-    )
-    .expect("gacha buy");
+    let randomness = next_randomness(env, m, &trader_key, index);
+    let accounts = swap_accounts(m, &trader_key, true, Some((index, randomness)), &t.1, &t.2);
+    let mut instructions = vec![];
+    if pack(env, &pack_pda(&m.curve, &trader_key, index)).is_none() {
+        instructions.push(open_pack_ix(m, &trader_key, index));
+    }
+    instructions.push(client::swap(&accounts, &pack_args(amount, base, index)));
+    env.send(&instructions, &[&t.0]).expect("buy into a pack");
     (base, pot)
 }
 
@@ -626,6 +650,7 @@ fn market_creation_mints_a_fixed_supply_into_the_curve() {
     assert_eq!(env.token_balance(&m.quote_vault), 0);
     assert_eq!(env.token_balance(&m.pot_vault), 0);
     assert_eq!(reserves(&env, &m), (0, SUPPLY));
+    assert_eq!(curve_pack_nonce(&env, &m), 0);
 
     // The mint authority is gone and the supply is exactly what the curve holds.
     let mint = env.account_data(&m.token_mint);
@@ -707,7 +732,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     let event = &swap_events(&meta)[0];
     assert_eq!((event.net_sent, event.received), (amount, expected));
 
-    // Sell half back; the quote reserve is what pays, 0.5% of the tokens go to the
+    // Sell half back; the quote reserve is what pays, 0.3% of the tokens go to the
     // pot, and the quoter agrees.
     let sell = expected / 2;
     let (expected_quote, sell_fee) = price_sell(&env, &m, sell);
@@ -772,42 +797,49 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
 }
 
 #[test]
-fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
+fn a_buy_into_a_pack_pays_the_same_and_drops_a_draw() {
     let mut env = Env::new();
     let m = setup(&mut env);
     let t = trader(&mut env, &m, 20_000_000_000);
     let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
 
     let amount = 2_000_000_000;
     let (base, pot) = price_buy(&env, &m, amount);
     assert!(pot > 0 && pot < base);
-    // Opting in costs nothing: the same four fees as a plain buy, the same base output.
+    // A pack buy costs nothing extra: the same four fees as a plain buy.
     assert_eq!(
         fees_on(amount),
         (6_000_000, 1_000_000, 1_000_000, 2_000_000)
     );
 
-    // The quoter resolves the pot and the trader's ticket, and quotes the base amount.
+    // The quoter resolves the pack and, in a second round, the randomness account of
+    // its first draw (the pack is not open yet, so it will get the curve's next nonce),
+    // and quotes the base amount.
     let mut quoter = quoter_for(&env, &m, &[]);
-    let request = quote_request(&m, true, amount, Some(trader_key), vec![1]);
+    let request = quote_request(
+        &m,
+        true,
+        amount,
+        Some(trader_key),
+        0u16.to_le_bytes().to_vec(),
+    );
     let resolved = quoter
         .resolve_accounts(&view(&env, &m), &request, |_, _| {})
         .unwrap();
-    // Two rounds: the ticket first, then the randomness account its data names.
     assert_eq!(
         resolved,
         vec![
             AccountMeta::new(m.token_vault, false),
             AccountMeta::new(m.pot_vault, false),
-            AccountMeta::new(ticket_key, false),
-            AccountMeta::new_readonly(next_randomness(&env, &m, &trader_key), false),
+            AccountMeta::new(pack_key, false),
+            AccountMeta::new_readonly(next_randomness(&env, &m, &trader_key, 0), false),
         ]
     );
     let quote = quoter.quote(&view(&env, &m), &request, &resolved).unwrap();
     assert_eq!(quote.amount_out, base);
-    // Anonymous gacha quotes omit the ticket but still price the base.
-    let anonymous = quote_request(&m, true, amount, None, vec![1]);
+    // Anonymous quotes carry no pack but still price the base.
+    let anonymous = quote_request(&m, true, amount, None, 0u16.to_le_bytes().to_vec());
     let resolved_anonymous = quoter
         .resolve_accounts(&view(&env, &m), &anonymous, |_, _| {})
         .unwrap();
@@ -820,25 +852,28 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
         base
     );
 
-    // Without an open ticket the swap fails.
+    // Without an open pack the swap fails.
+    let randomness = next_randomness(&env, &m, &trader_key, 0);
     let accounts = swap_accounts(
         &m,
         &trader_key,
         true,
-        Some(next_randomness(&env, &m, &trader_key)),
+        Some((0, randomness)),
         &trader_quote,
         &trader_token,
     );
     assert_fails_with(
         env.send(
-            &[client::swap(&accounts, &gacha_args(amount, base))],
+            &[client::swap(&accounts, &pack_args(amount, base, 0))],
             &[&t.0],
         ),
         "WrongAccount",
     );
 
+    // Opened in the same transaction, the buy drops draw 0 into it.
     let slot = current_slot(&env);
-    let (got_base, got_pot) = gacha_buy(&mut env, &m, &t, amount);
+    let pot_before = env.token_balance(&m.pot_vault);
+    let (got_base, got_pot) = pack_buy(&mut env, &m, &t, 0, amount);
     assert_eq!((got_base, got_pot), (base, pot));
     assert_eq!(env.token_balance(&trader_token), base);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
@@ -851,40 +886,37 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
         reserves(&env, &m),
         (amount - claimable(amount), SUPPLY - base - pot)
     );
-    assert_eq!(ticket(&env, &ticket_key), Some((true, slot, base)));
+    let nonce = curve_pack_nonce(&env, &m);
+    assert_eq!(pack(&env, &pack_key), Some((0, nonce, 1, 0)));
+    assert_eq!(
+        draw(&env, &pack_key, 0),
+        (
+            DRAW_ARMED,
+            base,
+            pot_before,
+            slot,
+            draw_seed(&pack_key, nonce, 0)
+        )
+    );
 
-    // A second gacha buy must wait for the ticket; plain buys still work.
-    let accounts = swap_accounts(
-        &m,
-        &trader_key,
-        true,
-        Some(next_randomness(&env, &m, &trader_key)),
-        &trader_quote,
-        &trader_token,
-    );
-    assert_fails_with(
-        env.send(&[client::swap(&accounts, &gacha_args(amount, 0))], &[&t.0]),
-        "TicketPending",
-    );
+    // Another buy drops draw 1; a plain buy drops nothing.
+    let (base2, _) = pack_buy(&mut env, &m, &t, 0, amount);
+    assert_eq!(pack(&env, &pack_key), Some((0, nonce, 2, 0)));
+    assert_eq!(draw(&env, &pack_key, 1).1, base2);
     let (plain, _) = price_buy(&env, &m, amount);
     let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     env.send(
         &[client::swap(&accounts, &exact_in(amount, plain))],
         &[&t.0],
     )
-    .expect("plain buy with an armed ticket");
+    .expect("plain buy");
+    assert_eq!(pack(&env, &pack_key), Some((0, nonce, 2, 0)));
 
-    // An armed ticket cannot be closed, only resolved.
-    assert_fails_with(
-        env.send(&[close_ticket_ix(&m, &trader_key)], &[&t.0]),
-        "TicketArmed",
-    );
-
-    // The gacha flag means nothing on a sell, and unknown flags are rejected.
+    // A pack index means nothing on a sell, and other extra lengths are rejected.
     let accounts = swap_accounts(&m, &trader_key, false, None, &trader_quote, &trader_token);
     assert_fails_with(
         env.send(
-            &[client::swap(&accounts, &gacha_args(1_000_000, 0))],
+            &[client::swap(&accounts, &pack_args(1_000_000, 0, 0))],
             &[&t.0],
         ),
         "BadExtra",
@@ -901,61 +933,111 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
 }
 
 #[test]
-fn an_unarmed_ticket_can_be_closed_for_its_rent() {
+fn a_full_pack_refuses_draws_until_another_is_opened() {
     let mut env = Env::new();
     let m = setup(&mut env);
-    let t = trader(&mut env, &m, 1_000_000_000);
+    let t = trader(&mut env, &m, 100_000_000_000);
     let trader_key = t.0.pubkey();
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
+    let pack0 = pack_pda(&m.curve, &trader_key, 0);
+    let pack1 = pack_pda(&m.curve, &trader_key, 1);
 
-    let before = env.lamports(&trader_key);
-    env.send(&[open_ticket_ix(&m, &trader_key)], &[&t.0])
-        .expect("open");
-    assert_eq!(ticket(&env, &ticket_key), Some((false, 0, 0)));
-    assert!(env.lamports(&trader_key) < before);
-    env.send(&[close_ticket_ix(&m, &trader_key)], &[&t.0])
-        .expect("close");
-    assert_eq!(ticket(&env, &ticket_key), None);
-    assert_eq!(env.lamports(&trader_key), before);
+    for i in 0..PACK_DRAWS as u8 {
+        pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
+        assert_eq!(draw(&env, &pack0, i).0, DRAW_ARMED);
+    }
+    let (_, nonce0, draws, _) = pack(&env, &pack0).unwrap();
+    assert_eq!(draws as usize, PACK_DRAWS);
+    // Every seed is distinct.
+    let mut seeds: Vec<[u8; 32]> = (0..PACK_DRAWS as u8)
+        .map(|i| draw(&env, &pack0, i).4)
+        .collect();
+    seeds.sort();
+    seeds.dedup();
+    assert_eq!(seeds.len(), PACK_DRAWS);
 
-    // Only the trader can close their ticket.
-    env.send(&[open_ticket_ix(&m, &trader_key)], &[&t.0])
-        .expect("open again");
-    let stranger = env.funded_keypair();
-    let mut ix = close_ticket_ix(&m, &trader_key);
-    ix.accounts[0] = AccountMeta::new(stranger.pubkey(), true);
-    assert!(env.send(&[ix], &[&stranger]).is_err());
+    // The seventeenth draw has no room.
+    let amount = 1_000_000_000;
+    let (base, _) = price_buy(&env, &m, amount);
+    let randomness = next_randomness(&env, &m, &trader_key, 0);
+    let accounts = swap_accounts(&m, &trader_key, true, Some((0, randomness)), &t.1, &t.2);
+    assert_fails_with(
+        env.send(
+            &[client::swap(&accounts, &pack_args(amount, base, 0))],
+            &[&t.0],
+        ),
+        "PackFull",
+    );
+
+    // A second pack takes it, with its own nonce.
+    pack_buy(&mut env, &m, &t, 1, amount);
+    assert_eq!(pack(&env, &pack1), Some((1, nonce0 + 1, 1, 0)));
+    assert_ne!(draw(&env, &pack1, 0).4, draw(&env, &pack0, 0).4);
 }
 
 #[test]
-fn tickets_resolve_against_fulfilled_vrf_randomness() {
+fn packs_close_only_once_every_draw_is_opened() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    let t = trader(&mut env, &m, 10_000_000_000);
+    let trader_key = t.0.pubkey();
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+
+    // An empty pack closes straight away, for its rent.
+    let before = env.lamports(&trader_key);
+    env.send(&[open_pack_ix(&m, &trader_key, 0)], &[&t.0])
+        .expect("open");
+    assert!(env.lamports(&trader_key) < before);
+    env.send(&[close_pack_ix(&m, &trader_key, 0)], &[&t.0])
+        .expect("close");
+    assert_eq!(pack(&env, &pack_key), None);
+    assert_eq!(env.lamports(&trader_key), before);
+
+    // With an unopened draw it does not, and only the trader may close it at all.
+    pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
+    assert_fails_with(
+        env.send(&[close_pack_ix(&m, &trader_key, 0)], &[&t.0]),
+        "PackHasUnopenedDraws",
+    );
+    let stranger = env.funded_keypair();
+    let mut ix = close_pack_ix(&m, &trader_key, 0);
+    ix.accounts[0] = AccountMeta::new(stranger.pubkey(), true);
+    assert!(env.send(&[ix], &[&stranger]).is_err());
+
+    // Once its draw is opened it closes, and a new pack 0 gets a fresh nonce.
+    let (_, nonce, _, _) = pack(&env, &pack_key).unwrap();
+    fulfil(&mut env, &pack_key, 0, LOSE);
+    env.send(&[open_draw_ix(&env, &m, &trader_key, 0, 0, &t.2)], &[])
+        .expect("open the draw");
+    env.send(&[close_pack_ix(&m, &trader_key, 0)], &[&t.0])
+        .expect("close after opening");
+    pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
+    assert_eq!(pack(&env, &pack_key), Some((0, nonce + 1, 1, 0)));
+}
+
+#[test]
+fn draws_open_against_fulfilled_vrf_randomness() {
     let mut env = Env::new();
     let m = setup(&mut env);
 
-    // Several gacha buys build up the pot before the winner's.
+    // Several buys build up the pot before the winner's.
     for _ in 0..3 {
         let other = trader(&mut env, &m, 10_000_000_000);
-        gacha_buy(&mut env, &m, &other, 3_000_000_000);
+        pack_buy(&mut env, &m, &other, 0, 3_000_000_000);
     }
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let buy_slot = current_slot(&env);
-    let (stake, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    let (stake, _) = pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
     let pot_before = env.token_balance(&m.pot_vault);
-    let rent = env.lamports(&ticket_key);
-    let trader_lamports = env.lamports(&trader_key);
+    let (_, nonce, _, _) = pack(&env, &pack_key).unwrap();
+    let seed = draw(&env, &pack_key, 0).4;
+    assert_eq!(seed, draw_seed(&pack_key, nonce, 0));
 
-    // The ticket's first round names its seed; the randomness account is ORAO's PDA.
-    let (round, seed, nonce) = ticket_round(&env, &ticket_key);
-    assert_eq!((round, seed), (1, ticket_seed(&ticket_key, nonce, 1)));
-    assert_eq!(nonce, curve_ticket_nonce(&env, &m));
-
-    // Until the VRF has fulfilled the seed, resolution waits: not requested at all,
-    // then requested but pending.
+    // Until the VRF has fulfilled the seed, opening waits: not requested at all, then
+    // requested but pending.
     assert_fails_with(
         env.send(
-            &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+            &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
             &[],
         ),
         "NotFulfilled",
@@ -963,48 +1045,59 @@ fn tickets_resolve_against_fulfilled_vrf_randomness() {
     write_randomness(&mut env, &seed, None);
     assert_fails_with(
         env.send(
-            &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+            &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
             &[],
         ),
         "NotFulfilled",
     );
     // Randomness fulfilled under a different seed is refused.
-    let wrong_seed = ticket_seed(&ticket_key, nonce, 2);
+    let wrong_seed = draw_seed(&pack_key, nonce, 1);
     write_randomness(&mut env, &wrong_seed, Some(&randomness_that(WIN)));
-    let mut wrong = resolve_ticket_ix(&env, &m, &trader_key, &trader_token);
+    let mut wrong = open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token);
     wrong.accounts[7] = AccountMeta::new_readonly(randomness_pda(&wrong_seed), false);
     assert_fails_with(env.send(&[wrong], &[]), "WrongAccount");
+    // So is a draw that does not exist.
+    assert_fails_with(
+        env.send(
+            &[open_draw_ix(&env, &m, &trader_key, 0, 1, &trader_token)],
+            &[],
+        ),
+        "DrawNotArmed",
+    );
+    assert_fails_with(
+        env.send(
+            &[open_draw_ix(&env, &m, &trader_key, 0, 16, &trader_token)],
+            &[],
+        ),
+        "NoSuchDraw",
+    );
 
-    // The oracles fulfil the seed with a winning value. Resolved by someone other than
+    // The oracles fulfil the seed with a winning value. Opened by someone other than
     // the trader (the test payer), as a keeper would.
-    env.svm.warp_to_slot(buy_slot + 3);
-    fulfil(&mut env, &ticket_key, WIN);
+    fulfil(&mut env, &pack_key, 0, WIN);
     env.send(
-        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
         &[],
     )
-    .expect("resolve");
+    .expect("open");
 
+    // A fresh draw is capped by the pot as it is now.
     let bonus = stake as u128 * BONUS_BPS as u128 / 10_000;
     let cap = pot_before as u128 * MAX_WIN_POT_BPS as u128 / 10_000;
     let payout = bonus.min(cap) as u64;
     assert!(payout > 0);
     assert_eq!(env.token_balance(&trader_token), stake + payout);
     assert_eq!(env.token_balance(&m.pot_vault), pot_before - payout);
-    // The ticket is closed and its rent returned to the trader, whoever resolved it.
-    assert_eq!(ticket(&env, &ticket_key), None);
-    assert_eq!(env.lamports(&trader_key), trader_lamports + rent);
+    assert_eq!(pack(&env, &pack_key), Some((0, nonce, 1, 1)));
+    assert_eq!(draw(&env, &pack_key, 0).0, DRAW_OPENED);
 
-    // The trader can play again: the reopened ticket gets a new nonce, so its first
-    // round's seed is fresh even though round 1 of the old one was fulfilled.
-    let (stake2, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    assert_eq!(
-        ticket(&env, &ticket_key),
-        Some((true, buy_slot + 3, stake2))
-    );
-    assert_eq!(
-        ticket_round(&env, &ticket_key),
-        (1, ticket_seed(&ticket_key, nonce + 1, 1), nonce + 1)
+    // A draw opens once.
+    assert_fails_with(
+        env.send(
+            &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
+            &[],
+        ),
+        "DrawNotArmed",
     );
 }
 
@@ -1015,9 +1108,9 @@ fn a_buy_refuses_a_seed_whose_randomness_was_already_requested() {
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
 
-    // Someone requested (and even got) randomness for the ticket's next seed before
-    // the buy: the buy must not arm against it, or the outcome could be known upfront.
-    let seed = next_seed(&env, &m, &trader_key);
+    // Someone requested (and even got) randomness for the draw's seed before the buy:
+    // the buy must not arm against it, or the outcome could be known upfront.
+    let seed = next_seed(&env, &m, &trader_key, 0);
     write_randomness(&mut env, &seed, Some(&randomness_that(JACKPOT)));
     let amount = 1_000_000_000;
     let (base, _) = price_buy(&env, &m, amount);
@@ -1025,32 +1118,18 @@ fn a_buy_refuses_a_seed_whose_randomness_was_already_requested() {
         &m,
         &trader_key,
         true,
-        Some(randomness_pda(&seed)),
+        Some((0, randomness_pda(&seed))),
         &trader_quote,
         &trader_token,
     );
-    assert_fails_with(
-        env.send(
-            &[
-                open_ticket_ix(&m, &trader_key),
-                client::swap(&accounts, &gacha_args(amount, base)),
-            ],
-            &[&t.0],
-        ),
-        "SeedAlreadyRequested",
-    );
+    let buy = [
+        open_pack_ix(&m, &trader_key, 0),
+        client::swap(&accounts, &pack_args(amount, base, 0)),
+    ];
+    assert_fails_with(env.send(&buy, &[&t.0]), "SeedAlreadyRequested");
     // A pending request blocks it just the same.
     write_randomness(&mut env, &seed, None);
-    assert_fails_with(
-        env.send(
-            &[
-                open_ticket_ix(&m, &trader_key),
-                client::swap(&accounts, &gacha_args(amount, base)),
-            ],
-            &[&t.0],
-        ),
-        "SeedAlreadyRequested",
-    );
+    assert_fails_with(env.send(&buy, &[&t.0]), "SeedAlreadyRequested");
 }
 
 #[test]
@@ -1061,20 +1140,20 @@ fn a_jackpot_pays_a_multiple_of_the_stake_capped_at_its_share_of_the_pot() {
     // Build a pot with other traders' buys, then the lucky one's.
     for _ in 0..4 {
         let other = trader(&mut env, &m, 10_000_000_000);
-        gacha_buy(&mut env, &m, &other, 5_000_000_000);
+        pack_buy(&mut env, &m, &other, 0, 5_000_000_000);
     }
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let (stake, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    let (stake, _) = pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
     let pot_before = env.token_balance(&m.pot_vault);
 
-    fulfil(&mut env, &ticket_key, JACKPOT);
+    fulfil(&mut env, &pack_key, 0, JACKPOT);
     env.send(
-        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
         &[],
     )
-    .expect("resolve a jackpot");
+    .expect("open a jackpot");
 
     // 100x the stake would be far more than the pot holds, so the cap binds: half the
     // pot, which is still many times the regular win.
@@ -1086,52 +1165,65 @@ fn a_jackpot_pays_a_multiple_of_the_stake_capped_at_its_share_of_the_pot() {
     assert!(payout > 4 * regular_cap);
     assert_eq!(env.token_balance(&trader_token), stake + payout);
     assert_eq!(env.token_balance(&m.pot_vault), pot_before - payout);
-    assert_eq!(ticket(&env, &ticket_key), None);
 }
 
 #[test]
-fn losing_tickets_pay_nothing_and_still_close() {
+fn losing_draws_pay_nothing_and_still_open() {
     let mut env = Env::new();
     let m = setup(&mut env);
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let (stake, pot) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    let (stake, pot) = pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
 
-    fulfil(&mut env, &ticket_key, LOSE);
-    let resolve = resolve_ticket_ix(&env, &m, &trader_key, &trader_token);
-    env.send(std::slice::from_ref(&resolve), &[])
-        .expect("resolve a loss");
-    assert_eq!(env.token_balance(&trader_token), stake);
-    assert_eq!(env.token_balance(&m.pot_vault), pot);
-    assert_eq!(ticket(&env, &ticket_key), None);
-
-    // Resolving a closed ticket fails.
-    assert!(env.send(&[resolve], &[]).is_err());
-}
-
-#[test]
-fn tickets_left_past_the_resolve_window_expire_without_a_payout() {
-    let mut env = Env::new();
-    let m = setup(&mut env);
-    let t = trader(&mut env, &m, 10_000_000_000);
-    let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let buy_slot = current_slot(&env);
-    let (stake, pot) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-
-    // Even fulfilled winning randomness pays nothing once the window has passed, and
-    // an expired ticket closes without any randomness at all.
-    env.svm.warp_to_slot(buy_slot + RESOLVE_WINDOW + 1);
-    fulfil(&mut env, &ticket_key, WIN);
+    fulfil(&mut env, &pack_key, 0, LOSE);
     env.send(
-        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
         &[],
     )
-    .expect("expire");
+    .expect("open a loss");
     assert_eq!(env.token_balance(&trader_token), stake);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
-    assert_eq!(ticket(&env, &ticket_key), None);
+    assert_eq!(pack(&env, &pack_key), Some((0, 1, 1, 1)));
+}
+
+#[test]
+fn a_stale_draw_is_capped_by_the_pot_as_it_was_at_the_buy() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    // A little pot, then the trader's small buy.
+    let first = trader(&mut env, &m, 20_000_000_000);
+    pack_buy(&mut env, &m, &first, 0, 10_000_000_000);
+    let t = trader(&mut env, &m, 10_000_000_000);
+    let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    let pot_at_buy = env.token_balance(&m.pot_vault);
+    let buy_slot = current_slot(&env);
+    let (stake, _) = pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
+    assert_eq!(draw(&env, &pack_key, 0).2, pot_at_buy);
+
+    // The pot grows a lot afterwards.
+    for _ in 0..4 {
+        let other = trader(&mut env, &m, 20_000_000_000);
+        pack_buy(&mut env, &m, &other, 0, 10_000_000_000);
+    }
+    let pot_now = env.token_balance(&m.pot_vault);
+    assert!(pot_now > 2 * pot_at_buy);
+
+    // Opened after the fresh window, a win is capped by the pot at the buy, not now.
+    env.svm.warp_to_slot(buy_slot + FRESH_WINDOW + 1);
+    fulfil(&mut env, &pack_key, 0, WIN);
+    env.send(
+        &[open_draw_ix(&env, &m, &trader_key, 0, 0, &trader_token)],
+        &[],
+    )
+    .expect("open late");
+    let bonus = stake as u128 * BONUS_BPS as u128 / 10_000;
+    let stale_cap = pot_at_buy as u128 * MAX_WIN_POT_BPS as u128 / 10_000;
+    let fresh_cap = pot_now as u128 * MAX_WIN_POT_BPS as u128 / 10_000;
+    assert!(bonus > fresh_cap, "the cap must bind for this check");
+    assert_eq!(env.token_balance(&trader_token), stake + stale_cap as u64);
+    assert!(stale_cap < fresh_cap);
 }
 
 #[test]
@@ -1215,23 +1307,23 @@ fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_launchpad() 
 }
 
 #[test]
-fn wins_are_paid_only_to_the_tickets_trader() {
+fn wins_are_paid_only_to_the_packs_trader() {
     let mut env = Env::new();
     let m = setup(&mut env);
     let t = trader(&mut env, &m, 10_000_000_000);
     let trader_key = t.0.pubkey();
-    let ticket_key = ticket_pda(&m.curve, &trader_key);
-    gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    fulfil(&mut env, &ticket_key, WIN);
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    pack_buy(&mut env, &m, &t, 0, 1_000_000_000);
+    fulfil(&mut env, &pack_key, 0, WIN);
 
     // A keeper pointing the payout at their own token account is refused.
     let keeper = Pubkey::new_unique();
     let keeper_token = env.create_ata(&keeper, &m.token_mint, &TOKEN);
     assert!(env
         .send(
-            &[resolve_ticket_ix(&env, &m, &trader_key, &keeper_token)],
+            &[open_draw_ix(&env, &m, &trader_key, 0, 0, &keeper_token)],
             &[]
         )
         .is_err());
-    assert_eq!(ticket(&env, &ticket_key).map(|t| t.0), Some(true));
+    assert_eq!(draw(&env, &pack_key, 0).0, DRAW_ARMED);
 }

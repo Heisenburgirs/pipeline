@@ -15,25 +15,28 @@
 //! launchpad; both sit in the vaults until claimed with `claim_fees`. The pot is what
 //! gacha wins are paid from, so all trading funds the prizes.
 //!
-//! The gacha is opt-in per buy and costs nothing extra. A buyer who sets the first byte
-//! of the trade's `extra` to 1 has their ticket armed with the slot of the buy and a
-//! fresh randomness **seed**. The buyer, or anyone, then asks the ORAO VRF for that
-//! seed, and once the oracles have fulfilled it anyone may resolve the ticket: the
-//! verifiable randomness decides the roll. A 1-in-`win_one_in` win pays `bonus_bps` of
-//! the buyer's base output from the pot, capped at `max_win_pot_bps` of the pot. A rarer
-//! 1-in-`jackpot_one_in` **jackpot** pays `jackpot_bps` of the base output, a multiple
-//! of it rather than a share, capped at `max_jackpot_pot_bps` of the pot.
+//! Every buy that names one of the trader's **packs** (the pack index in the trade's
+//! `extra`) also drops a **draw** into it, for free: the draw records the purchase size,
+//! the pot's size at that moment and a fresh randomness **seed**. A pack holds
+//! [`PACK_DRAWS`] draws; a full pack means opening another. Draws accumulate and are
+//! opened whenever the trader likes: they (or anyone) ask the ORAO VRF for the draw's
+//! seed, and once the oracles have fulfilled it anyone may open the draw. A
+//! 1-in-`win_one_in` win pays `bonus_bps` of the purchase from the pot, capped at
+//! `max_win_pot_bps` of the pot; a rarer 1-in-`jackpot_one_in` **jackpot** pays
+//! `jackpot_bps` of the purchase, a multiple of it, capped at `max_jackpot_pot_bps`. A
+//! draw opened within `fresh_window_slots` of its buy is capped by the pot as it is; a
+//! draw left longer is also capped by the pot as it was at the buy, so sitting on a
+//! draw never makes it worth more.
 //!
 //! Why a separate reveal: a roll decided inside the buy transaction can be filtered for
 //! free. A trader sets `min_amount_out` to the jackpot and lets losing rolls revert,
 //! paying the fee only when they win. Deciding with randomness that does not exist yet
-//! at buy time closes that. A ticket's seed is fixed by the ticket, a nonce it got when
-//! it was opened and its round counter, and the buy refuses to arm when that seed has
-//! already been requested, so nobody can learn an outcome before committing. Resolving within
-//! `resolve_window_slots` of the buy stops a known winner from waiting for a bigger pot.
+//! at buy time closes that. A draw's seed is fixed by the pack, a nonce it got when it
+//! was opened and the draw's index, and the buy refuses to add the draw when that seed
+//! has already been requested, so nobody can learn an outcome before committing.
 //!
 //! Quotes return the deterministic base amount. The bonus never passes through the
-//! router: it is paid by `resolve_ticket`, a custom action anyone can call.
+//! router: it is paid by `open_draw`, a custom action anyone can call.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -47,12 +50,12 @@ declare_id!("2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G");
 const BPS: u128 = 10_000;
 /// Decimals of every token this strategy launches.
 pub const TOKEN_DECIMALS: u8 = 6;
-/// `extra[0]` value that opts a buy into the gacha.
-pub const GACHA_FLAG: u8 = 1;
+/// Draws a pack holds.
+pub const PACK_DRAWS: usize = 16;
 /// Mint index of the quote token (what buyers pay with) and of the launched token.
 pub const QUOTE_INDEX: u8 = 0;
 pub const TOKEN_INDEX: u8 = 1;
-/// The ORAO VRF program, whose fulfilled randomness decides tickets.
+/// The ORAO VRF program, whose fulfilled randomness decides draws.
 pub const ORAO_VRF_PROGRAM: Pubkey = pubkey!("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
 /// Seed prefix of ORAO randomness request accounts: `[prefix, seed]` under the VRF
 /// program.
@@ -117,7 +120,7 @@ pub mod gacha_curve {
         curve.win_one_in = params.win_one_in;
         curve.bonus_bps = params.bonus_bps;
         curve.max_win_pot_bps = params.max_win_pot_bps;
-        curve.resolve_window_slots = params.resolve_window_slots;
+        curve.fresh_window_slots = params.fresh_window_slots;
         curve.pot_fee_bps = params.pot_fee_bps;
         curve.curve_fee_bps = params.curve_fee_bps;
         curve.creator_fee_bps = params.creator_fee_bps;
@@ -129,7 +132,7 @@ pub mod gacha_curve {
         curve.jackpot_one_in = params.jackpot_one_in;
         curve.jackpot_bps = params.jackpot_bps;
         curve.max_jackpot_pot_bps = params.max_jackpot_pot_bps;
-        curve.ticket_nonce = 0;
+        curve.pack_nonce = 0;
         curve.market_signer = expected_signer;
         curve.bump = ctx.bumps.curve;
         Ok(())
@@ -146,9 +149,9 @@ pub mod gacha_curve {
         Ok(())
     }
 
-    /// Strategy accounts for a trade: the output vault and the pot vault, and for a
-    /// gacha buy also the trader's ticket and, in a second round once the ticket's data
-    /// is in hand, the ORAO randomness account for the ticket's next seed.
+    /// Strategy accounts for a trade: the output vault and the pot vault, and for a buy
+    /// into a pack also that pack and, in a second round once the pack's data is in
+    /// hand, the ORAO randomness account for its next draw's seed.
     pub fn pipeline_resolve_accounts(
         ctx: Context<ReadTrade>,
         request: psi::ResolveRequest,
@@ -166,31 +169,29 @@ pub mod gacha_curve {
             },
         ];
         let mut complete = true;
-        if kind == TradeKind::GachaBuy {
-            if let Some(trader) = request.trade.trader {
-                let trader = Pubkey::new_from_array(trader);
-                let ticket = ticket_address(&curve.key(), &trader);
+        if let (TradeKind::Buy { pack: Some(index) }, Some(trader)) = (kind, request.trade.trader) {
+            let trader = Pubkey::new_from_array(trader);
+            let pack = pack_address(&curve.key(), &trader, index);
+            accounts.push(psi::AccountRef {
+                address: pack.to_bytes(),
+                writable: true,
+            });
+            if request.round == 0 {
+                complete = false;
+            } else {
+                // The accounts of round 0 follow the fixed ones; the pack is third. A
+                // pack not opened yet (opened in the swap's transaction) will get the
+                // curve's next nonce and start with draw 0.
+                let (nonce, draws) = ctx
+                    .remaining_accounts
+                    .get(2)
+                    .and_then(pack_nonce_and_draws)
+                    .unwrap_or((curve.pack_nonce.saturating_add(1), 0));
+                let seed = draw_seed(&pack, nonce, draws);
                 accounts.push(psi::AccountRef {
-                    address: ticket.to_bytes(),
-                    writable: true,
+                    address: randomness_address(&seed).to_bytes(),
+                    writable: false,
                 });
-                if request.round == 0 {
-                    complete = false;
-                } else {
-                    // The accounts of round 0 follow the fixed ones; the ticket is third.
-                    // A ticket not opened yet (opened in the swap's transaction) will get
-                    // the curve's next nonce and start at round 0.
-                    let (nonce, rounds) = ctx
-                        .remaining_accounts
-                        .get(2)
-                        .and_then(ticket_nonce_and_rounds)
-                        .unwrap_or((curve.ticket_nonce.saturating_add(1), 0));
-                    let seed = ticket_seed(&ticket, nonce, rounds.saturating_add(1));
-                    accounts.push(psi::AccountRef {
-                        address: randomness_address(&seed).to_bytes(),
-                        writable: false,
-                    });
-                }
             }
         }
         let result = psi::ResolveResult { accounts, complete };
@@ -204,8 +205,8 @@ pub mod gacha_curve {
         Ok(())
     }
 
-    /// Remaining accounts: the output vault, the pot vault, for a gacha buy the trader's
-    /// open ticket and the ORAO randomness account for its next seed (which must not
+    /// Remaining accounts: the output vault, the pot vault, for a buy into a pack that
+    /// pack and the ORAO randomness account for its next draw's seed (which must not
     /// exist yet), then any transfer-hook accounts of the quote mint.
     pub fn pipeline_swap<'info>(
         ctx: Context<'info, SwapAccounts<'info>>,
@@ -274,6 +275,8 @@ pub mod gacha_curve {
             curve.pot_vault,
             GachaError::WrongAccount
         );
+        // What the pot held before this trade: the ceiling of this draw's prizes.
+        let pot_before = token_balance(pot_vault_info)?;
         // On a buy the fee bought tokens from the token vault; on a sell the fee is part
         // of the tokens the trader sent to the token vault. Either way: vault to pot.
         if priced.pot_out > 0 {
@@ -303,13 +306,15 @@ pub mod gacha_curve {
             )?;
         }
 
-        if kind == TradeKind::GachaBuy {
-            arm_ticket(
+        if let TradeKind::Buy { pack: Some(index) } = kind {
+            add_draw(
                 &ctx.remaining_accounts[2],
                 &ctx.remaining_accounts[3],
                 &ctx.accounts.curve.key(),
                 &ctx.accounts.trader.key(),
+                index,
                 priced.quote.amount_out,
+                pot_before,
             )?;
         }
 
@@ -318,7 +323,7 @@ pub mod gacha_curve {
         let curve = &mut ctx.accounts.curve;
         let claimable = priced.creator_fee + priced.protocol_fee;
         match kind {
-            TradeKind::Buy | TradeKind::GachaBuy => {
+            TradeKind::Buy { .. } => {
                 curve.quote_reserve = curve
                     .quote_reserve
                     .checked_add(priced.quote.amount_in - claimable)
@@ -352,70 +357,75 @@ pub mod gacha_curve {
         Ok(())
     }
 
-    /// Custom action: opens the trader's ticket for this curve. A gacha buy needs an
-    /// open, unarmed ticket; the buy arms it. Call this in the same transaction as the
-    /// swap, before it.
-    pub fn open_ticket(ctx: Context<OpenTicket>) -> Result<()> {
+    /// Custom action: opens a pack for the trader on this curve, `index` being the
+    /// trader's next pack number. A buy that names the pack drops a draw into it. Open
+    /// it in the same transaction as the first such buy, before the swap.
+    pub fn open_pack(ctx: Context<OpenPack>, index: u16) -> Result<()> {
         let curve = &mut ctx.accounts.curve;
-        curve.ticket_nonce = curve
-            .ticket_nonce
+        curve.pack_nonce = curve
+            .pack_nonce
             .checked_add(1)
             .ok_or(GachaError::Overflow)?;
-        let nonce = curve.ticket_nonce;
-        let ticket = &mut ctx.accounts.ticket;
-        ticket.nonce = nonce;
-        ticket.curve = ctx.accounts.curve.key();
-        ticket.trader = ctx.accounts.trader.key();
-        ticket.armed = false;
-        ticket.slot = 0;
-        ticket.stake = 0;
-        ticket.rounds = 0;
-        ticket.seed = [0; 32];
-        ticket.bump = ctx.bumps.ticket;
+        let nonce = curve.pack_nonce;
+        let pack = &mut ctx.accounts.pack;
+        pack.curve = ctx.accounts.curve.key();
+        pack.trader = ctx.accounts.trader.key();
+        pack.index = index;
+        pack.nonce = nonce;
+        pack.draws = 0;
+        pack.opened = 0;
+        pack.slots = [Draw::default(); PACK_DRAWS];
+        pack.bump = ctx.bumps.pack;
         Ok(())
     }
 
-    /// Custom action: closes an unarmed ticket and returns its rent to the trader.
-    pub fn close_ticket(ctx: Context<CloseTicket>) -> Result<()> {
-        require!(!ctx.accounts.ticket.armed, GachaError::TicketArmed);
+    /// Custom action: closes a pack whose every draw has been opened (or that has
+    /// none) and returns its rent to the trader.
+    pub fn close_pack(ctx: Context<ClosePack>) -> Result<()> {
+        let pack = &ctx.accounts.pack;
+        require!(pack.opened == pack.draws, GachaError::PackHasUnopenedDraws);
         Ok(())
     }
 
-    /// Custom action, callable by anyone: decides an armed ticket from the ORAO
-    /// randomness fulfilled for its seed and pays a win from the pot. Tickets not
-    /// resolved within `resolve_window_slots` of their buy expire and pay nothing.
-    /// Either way the ticket closes and its rent goes back to the trader.
-    pub fn resolve_ticket(ctx: Context<ResolveTicket>) -> Result<()> {
-        let ticket = &ctx.accounts.ticket;
+    /// Custom action, callable by anyone: opens draw `draw` of a pack from the ORAO
+    /// randomness fulfilled for its seed and pays a win from the pot. A fresh draw's prize
+    /// is capped by the pot now, a stale one's also by the pot at its buy.
+    pub fn open_draw(ctx: Context<OpenDraw>, draw: u8) -> Result<()> {
+        let pack = &ctx.accounts.pack;
         let curve = &ctx.accounts.curve;
-        require!(ticket.armed, GachaError::TicketNotArmed);
+        let entry = *pack
+            .slots
+            .get(draw as usize)
+            .ok_or(GachaError::NoSuchDraw)?;
+        require!(entry.state == DRAW_ARMED, GachaError::DrawNotArmed);
         let randomness_info = ctx.accounts.randomness.to_account_info();
         require_keys_eq!(
             randomness_info.key(),
-            randomness_address(&ticket.seed),
+            randomness_address(&entry.seed),
             GachaError::WrongAccount
         );
+        let randomness =
+            fulfilled_randomness(&randomness_info, &entry.seed)?.ok_or(GachaError::NotFulfilled)?;
 
-        let now = Clock::get()?.slot;
-        let expired = now > ticket.slot.saturating_add(curve.resolve_window_slots);
-
+        let tier = roll(&randomness, curve);
         let mut outcome = Outcome {
-            won: false,
-            jackpot: false,
-            expired,
+            won: tier != Tier::Lose,
+            jackpot: tier == Tier::Jackpot,
             payout: 0,
-            resolved_slot: now,
+            resolved_slot: Clock::get()?.slot,
         };
-        if !expired {
-            let randomness = fulfilled_randomness(&randomness_info, &ticket.seed)?
-                .ok_or(GachaError::NotFulfilled)?;
-            let tier = roll(&randomness, curve);
-            outcome.won = tier != Tier::Lose;
-            outcome.jackpot = tier == Tier::Jackpot;
-            if outcome.won {
-                let pot_balance = ctx.accounts.pot_vault.amount;
-                outcome.payout = payout(ticket.stake, pot_balance, curve, tier);
-            }
+        if outcome.won {
+            // A fresh draw is capped by the pot now; a stale one also by the pot at
+            // its buy, so waiting cannot raise a prize.
+            let fresh =
+                outcome.resolved_slot <= entry.slot.saturating_add(curve.fresh_window_slots);
+            let pot_now = ctx.accounts.pot_vault.amount;
+            let pot_cap = if fresh {
+                pot_now
+            } else {
+                pot_now.min(entry.pot_at_buy)
+            };
+            outcome.payout = payout(entry.stake, pot_cap, curve, tier);
         }
 
         if outcome.payout > 0 {
@@ -435,14 +445,17 @@ pub mod gacha_curve {
             )?;
         }
 
-        emit!(TicketResolved {
-            ticket: ticket.key(),
+        let pack = &mut ctx.accounts.pack;
+        pack.slots[draw as usize].state = DRAW_OPENED;
+        pack.opened += 1;
+        emit!(DrawResolved {
+            pack: pack.key(),
+            draw,
             curve: curve.key(),
-            trader: ticket.trader,
-            stake: ticket.stake,
+            trader: pack.trader,
+            stake: entry.stake,
             won: outcome.won,
             jackpot: outcome.jackpot,
-            expired: outcome.expired,
             payout: outcome.payout,
             resolved_slot: outcome.resolved_slot,
         });
@@ -540,10 +553,10 @@ pub struct InitParams {
     pub bonus_bps: u16,
     /// Cap on any single win, in basis points of the pot's balance.
     pub max_win_pot_bps: u16,
-    /// A ticket must be resolved within this many slots of its buy, or it pays nothing.
-    /// The VRF fulfils in seconds; the window stops a known winner from waiting for a
-    /// bigger pot.
-    pub resolve_window_slots: u64,
+    /// A draw opened within this many slots of its buy is capped by the pot as it is;
+    /// opened later, also by the pot as it was at the buy. Stops a known winner from
+    /// waiting for a bigger pot without punishing early draws.
+    pub fresh_window_slots: u64,
     /// Fee on every trade, in basis points of the input, paid into the pot.
     pub pot_fee_bps: u16,
     /// Fee on every trade, in basis points of the input, left in the curve's reserves.
@@ -579,11 +592,11 @@ impl InitParams {
         );
         require!(self.win_one_in >= 1, GachaError::BadInitData);
         require!(self.bonus_bps > 0, GachaError::BadInitData);
+        require!(self.fresh_window_slots >= 1, GachaError::BadInitData);
         require!(
             self.max_win_pot_bps > 0 && (self.max_win_pot_bps as u128) <= BPS,
             GachaError::BadInitData
         );
-        require!(self.resolve_window_slots >= 1, GachaError::BadInitData);
         require!(
             (self.max_jackpot_pot_bps as u128) <= BPS,
             GachaError::BadInitData
@@ -613,7 +626,7 @@ pub struct Curve {
     pub win_one_in: u32,
     pub bonus_bps: u16,
     pub max_win_pot_bps: u16,
-    pub resolve_window_slots: u64,
+    pub fresh_window_slots: u64,
     /// Fee on every trade, paid into the pot.
     pub pot_fee_bps: u16,
     /// Fee on every trade, left in the curve's reserves.
@@ -631,34 +644,49 @@ pub struct Curve {
     pub jackpot_one_in: u32,
     pub jackpot_bps: u32,
     pub max_jackpot_pot_bps: u16,
-    /// Tickets opened so far; each gets the next value as its nonce, so that seeds
-    /// never repeat even when a ticket is closed and opened again.
-    pub ticket_nonce: u64,
+    /// Packs opened so far; each gets the next value as its nonce, so that seeds never
+    /// repeat even when a pack is closed and another opened.
+    pub pack_nonce: u64,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
 }
 
-/// A trader's gacha ticket for one curve: one per trader, reused across buys.
+/// One of a trader's packs on a curve: up to [`PACK_DRAWS`] draws, one per buy.
 #[account]
 #[derive(InitSpace)]
-pub struct Ticket {
+pub struct Pack {
     pub curve: Pubkey,
     pub trader: Pubkey,
-    /// Set by a gacha buy; cleared by closing the ticket on resolution.
-    pub armed: bool,
-    /// Slot of the gacha buy.
-    pub slot: u64,
-    /// The buyer's base output, which the bonus is a share of.
-    pub stake: u64,
-    /// How many times the ticket has been armed; names the seed of each round.
-    pub rounds: u32,
-    /// The ORAO randomness seed of the current round:
-    /// `ticket_seed(ticket, nonce, rounds)`.
-    pub seed: [u8; 32],
-    /// Assigned from the curve's counter when the ticket was opened.
+    /// The trader's pack number, part of the address.
+    pub index: u16,
+    /// Assigned from the curve's counter when the pack was opened; part of every seed.
     pub nonce: u64,
+    /// Draws added so far (slots `0..draws` are used).
+    pub draws: u8,
+    /// Draws opened so far.
+    pub opened: u8,
+    pub slots: [Draw; PACK_DRAWS],
     pub bump: u8,
+}
+
+pub const DRAW_EMPTY: u8 = 0;
+pub const DRAW_ARMED: u8 = 1;
+pub const DRAW_OPENED: u8 = 2;
+
+/// A draw: what one buy put into a pack.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Default, InitSpace, PartialEq, Eq)]
+pub struct Draw {
+    /// [`DRAW_EMPTY`], [`DRAW_ARMED`] or [`DRAW_OPENED`].
+    pub state: u8,
+    /// The buyer's base output, which prizes are a share or a multiple of.
+    pub stake: u64,
+    /// The pot's balance when the draw was bought: the ceiling of its prizes.
+    pub pot_at_buy: u64,
+    /// Slot of the buy.
+    pub slot: u64,
+    /// The ORAO randomness seed: `draw_seed(pack, nonce, index)`.
+    pub seed: [u8; 32],
 }
 
 #[event]
@@ -670,47 +698,45 @@ pub struct FeesClaimed {
 }
 
 #[event]
-pub struct TicketResolved {
-    pub ticket: Pubkey,
+pub struct DrawResolved {
+    pub pack: Pubkey,
+    pub draw: u8,
     pub curve: Pubkey,
     pub trader: Pubkey,
     pub stake: u64,
     pub won: bool,
     /// Set with `won` when the roll hit the jackpot tier.
     pub jackpot: bool,
-    pub expired: bool,
     pub payout: u64,
-    /// The slot the ticket was resolved in.
+    /// The slot the draw was opened in.
     pub resolved_slot: u64,
 }
 
 struct Outcome {
     won: bool,
     jackpot: bool,
-    expired: bool,
     payout: u64,
     resolved_slot: u64,
 }
 
-/// What a trade is, from its mint indices and `extra`.
+/// What a trade is, from its mint indices and `extra`: a buy may name one of the
+/// trader's packs (its index, two bytes little-endian) to drop a draw into.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TradeKind {
-    Buy,
-    GachaBuy,
+    Buy { pack: Option<u16> },
     Sell,
 }
 
 impl TradeKind {
     fn of(trade: &psi::TradeRequest) -> Result<Self> {
-        let gacha = match trade.extra.first().copied() {
-            None | Some(0) => false,
-            Some(GACHA_FLAG) => true,
-            Some(_) => return err!(GachaError::BadExtra),
+        let pack = match trade.extra.as_slice() {
+            [] => None,
+            [lo, hi] => Some(u16::from_le_bytes([*lo, *hi])),
+            _ => return err!(GachaError::BadExtra),
         };
         match (trade.input_index, trade.output_index) {
-            (QUOTE_INDEX, TOKEN_INDEX) if gacha => Ok(TradeKind::GachaBuy),
-            (QUOTE_INDEX, TOKEN_INDEX) => Ok(TradeKind::Buy),
-            (TOKEN_INDEX, QUOTE_INDEX) if gacha => err!(GachaError::BadExtra),
+            (QUOTE_INDEX, TOKEN_INDEX) => Ok(TradeKind::Buy { pack }),
+            (TOKEN_INDEX, QUOTE_INDEX) if pack.is_some() => err!(GachaError::BadExtra),
             (TOKEN_INDEX, QUOTE_INDEX) => Ok(TradeKind::Sell),
             _ => err!(GachaError::WrongAccount),
         }
@@ -718,21 +744,21 @@ impl TradeKind {
 
     fn input_vault(self, curve: &Curve) -> Pubkey {
         match self {
-            TradeKind::Buy | TradeKind::GachaBuy => curve.quote_vault,
+            TradeKind::Buy { .. } => curve.quote_vault,
             TradeKind::Sell => curve.token_vault,
         }
     }
 
     fn output_vault(self, curve: &Curve) -> Pubkey {
         match self {
-            TradeKind::Buy | TradeKind::GachaBuy => curve.token_vault,
+            TradeKind::Buy { .. } => curve.token_vault,
             TradeKind::Sell => curve.quote_vault,
         }
     }
 
     fn reserve_in(self, curve: &Curve) -> u64 {
         match self {
-            TradeKind::Buy | TradeKind::GachaBuy => curve.quote_reserve,
+            TradeKind::Buy { .. } => curve.quote_reserve,
             TradeKind::Sell => curve.token_reserve,
         }
     }
@@ -740,9 +766,7 @@ impl TradeKind {
     /// Unclaimed fees held in the input vault.
     fn owed_in(self, curve: &Curve) -> u64 {
         match self {
-            TradeKind::Buy | TradeKind::GachaBuy => {
-                curve.creator_owed_quote + curve.protocol_owed_quote
-            }
+            TradeKind::Buy { .. } => curve.creator_owed_quote + curve.protocol_owed_quote,
             TradeKind::Sell => curve.creator_owed_token + curve.protocol_owed_token,
         }
     }
@@ -750,8 +774,8 @@ impl TradeKind {
     /// Strategy accounts that precede the transfer-hook accounts in `pipeline_swap`.
     fn own_account_count(self) -> usize {
         match self {
-            TradeKind::GachaBuy => 4,
-            TradeKind::Buy | TradeKind::Sell => 2,
+            TradeKind::Buy { pack: Some(_) } => 4,
+            TradeKind::Buy { pack: None } | TradeKind::Sell => 2,
         }
     }
 }
@@ -805,7 +829,7 @@ impl Curve {
         let x = self.virtual_quote as u128 + self.quote_reserve as u128;
         let y = self.virtual_token as u128 + self.token_reserve as u128;
         match kind {
-            TradeKind::Buy | TradeKind::GachaBuy => {
+            TradeKind::Buy { .. } => {
                 require!(self.token_reserve > 0, GachaError::InsufficientLiquidity);
                 // All four fees come off the input; a gacha buy pays nothing extra. The
                 // pot fee buys for the pot from the curve as it stands after the base
@@ -861,7 +885,7 @@ pub fn out_given_in(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u128
     mul_div(reserve_out, amount_in as u128, denominator).0
 }
 
-/// What a ticket's roll came to.
+/// What a draw's roll came to.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tier {
     Lose,
@@ -869,7 +893,7 @@ pub enum Tier {
     Jackpot,
 }
 
-/// What a ticket pays: the win or jackpot share of the stake, capped at the tier's
+/// What a draw pays: the win or jackpot share of the stake, capped at the tier's
 /// share of the pot, and never more than the pot holds.
 pub fn payout(stake: u64, pot_balance: u64, curve: &Curve, tier: Tier) -> u64 {
     let (prize_bps, cap_bps) = match tier {
@@ -895,15 +919,10 @@ pub fn roll(randomness: &[u8; 64], curve: &Curve) -> Tier {
     }
 }
 
-/// The randomness seed of the `round`-th gacha buy of a ticket opened with `nonce`.
-pub fn ticket_seed(ticket: &Pubkey, nonce: u64, round: u32) -> [u8; 32] {
-    solana_sha256_hasher::hashv(&[
-        b"gacha-vrf",
-        ticket.as_ref(),
-        &nonce.to_le_bytes(),
-        &round.to_le_bytes(),
-    ])
-    .to_bytes()
+/// The randomness seed of draw `index` of a pack opened with `nonce`.
+pub fn draw_seed(pack: &Pubkey, nonce: u64, index: u8) -> [u8; 32] {
+    solana_sha256_hasher::hashv(&[b"gacha-vrf", pack.as_ref(), &nonce.to_le_bytes(), &[index]])
+        .to_bytes()
 }
 
 /// The ORAO randomness request account for a seed.
@@ -911,16 +930,16 @@ pub fn randomness_address(seed: &[u8; 32]) -> Pubkey {
     Pubkey::find_program_address(&[ORAO_RANDOMNESS_SEED, seed], &ORAO_VRF_PROGRAM).0
 }
 
-/// A ticket's nonce and how many rounds it has been armed, or `None` if the account
-/// is not a ticket of this program (for example not opened yet).
-fn ticket_nonce_and_rounds(info: &AccountInfo) -> Option<(u64, u32)> {
+/// A pack's nonce and how many draws it holds, or `None` if the account is not a pack
+/// of this program (for example not opened yet).
+fn pack_nonce_and_draws(info: &AccountInfo) -> Option<(u64, u8)> {
     if *info.owner != crate::ID {
         return None;
     }
     let data = info.try_borrow_data().ok()?;
-    Ticket::try_deserialize(&mut &data[..])
+    Pack::try_deserialize(&mut &data[..])
         .ok()
-        .map(|ticket| (ticket.nonce, ticket.rounds))
+        .map(|pack| (pack.nonce, pack.draws))
 }
 
 /// Reads ORAO's `RandomnessV2` account for `seed`: `Ok(None)` while it does not exist
@@ -944,41 +963,48 @@ fn fulfilled_randomness(info: &AccountInfo, seed: &[u8; 32]) -> Result<Option<[u
     Ok(Some(data[73..137].try_into().unwrap()))
 }
 
-/// Arms the trader's open ticket with this buy. The ticket must belong to this curve
-/// and trader and not be armed already, and the ORAO randomness account for its next
+/// Drops this buy's draw into the trader's pack. The pack must belong to this curve and
+/// trader, carry `index`, have room, and the ORAO randomness account for the draw's
 /// seed must not exist yet, so the outcome cannot have been learned before the buy.
-fn arm_ticket(
+#[allow(clippy::too_many_arguments)]
+fn add_draw(
     info: &AccountInfo,
     randomness: &AccountInfo,
     curve: &Pubkey,
     trader: &Pubkey,
+    index: u16,
     stake: u64,
+    pot_at_buy: u64,
 ) -> Result<()> {
     require_keys_eq!(*info.owner, crate::ID, GachaError::WrongAccount);
     require!(info.is_writable, GachaError::WrongAccount);
-    let mut ticket = {
+    let mut pack = {
         let data = info.try_borrow_data()?;
-        Ticket::try_deserialize(&mut &data[..])?
+        Pack::try_deserialize(&mut &data[..])?
     };
-    require_keys_eq!(ticket.curve, *curve, GachaError::WrongAccount);
-    require_keys_eq!(ticket.trader, *trader, GachaError::WrongAccount);
-    require!(!ticket.armed, GachaError::TicketPending);
-    let round = ticket.rounds.checked_add(1).ok_or(GachaError::Overflow)?;
-    let seed = ticket_seed(&info.key(), ticket.nonce, round);
+    require_keys_eq!(pack.curve, *curve, GachaError::WrongAccount);
+    require_keys_eq!(pack.trader, *trader, GachaError::WrongAccount);
+    require!(pack.index == index, GachaError::WrongAccount);
+    let draw = pack.draws;
+    require!((draw as usize) < PACK_DRAWS, GachaError::PackFull);
+    let seed = draw_seed(&info.key(), pack.nonce, draw);
     require_keys_eq!(
         randomness.key(),
         randomness_address(&seed),
         GachaError::WrongAccount
     );
     require!(randomness.data_is_empty(), GachaError::SeedAlreadyRequested);
-    ticket.armed = true;
-    ticket.slot = Clock::get()?.slot;
-    ticket.stake = stake;
-    ticket.rounds = round;
-    ticket.seed = seed;
+    pack.slots[draw as usize] = Draw {
+        state: DRAW_ARMED,
+        stake,
+        pot_at_buy,
+        slot: Clock::get()?.slot,
+        seed,
+    };
+    pack.draws = draw + 1;
     let mut data = info.try_borrow_mut_data()?;
     let mut cursor: &mut [u8] = &mut data;
-    ticket.try_serialize(&mut cursor)?;
+    pack.try_serialize(&mut cursor)?;
     Ok(())
 }
 
@@ -995,8 +1021,17 @@ fn upgrade_authority(data: &[u8]) -> Option<Option<Pubkey>> {
     }
 }
 
-pub fn ticket_address(curve: &Pubkey, trader: &Pubkey) -> Pubkey {
-    Pubkey::find_program_address(&[b"ticket", curve.as_ref(), trader.as_ref()], &crate::ID).0
+pub fn pack_address(curve: &Pubkey, trader: &Pubkey, index: u16) -> Pubkey {
+    Pubkey::find_program_address(
+        &[
+            b"pack",
+            curve.as_ref(),
+            trader.as_ref(),
+            &index.to_le_bytes(),
+        ],
+        &crate::ID,
+    )
+    .0
 }
 
 /// `a × b / d` as (quotient, remainder), with a 256-bit product so large reserves can't
@@ -1259,7 +1294,8 @@ pub struct SwapAccounts<'info> {
 }
 
 #[derive(Accounts)]
-pub struct OpenTicket<'info> {
+#[instruction(index: u16)]
+pub struct OpenPack<'info> {
     #[account(mut)]
     pub trader: Signer<'info>,
     #[account(mut)]
@@ -1267,30 +1303,29 @@ pub struct OpenTicket<'info> {
     #[account(
         init,
         payer = trader,
-        space = 8 + Ticket::INIT_SPACE,
-        seeds = [b"ticket", curve.key().as_ref(), trader.key().as_ref()],
+        space = 8 + Pack::INIT_SPACE,
+        seeds = [b"pack", curve.key().as_ref(), trader.key().as_ref(), &index.to_le_bytes()],
         bump,
     )]
-    pub ticket: Account<'info, Ticket>,
+    pub pack: Account<'info, Pack>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct CloseTicket<'info> {
+pub struct ClosePack<'info> {
     #[account(mut)]
     pub trader: Signer<'info>,
     #[account(mut, has_one = trader, close = trader)]
-    pub ticket: Account<'info, Ticket>,
+    pub pack: Account<'info, Pack>,
 }
 
 #[derive(Accounts)]
-pub struct ResolveTicket<'info> {
-    #[account(mut, has_one = curve, has_one = trader, close = trader)]
-    pub ticket: Account<'info, Ticket>,
+pub struct OpenDraw<'info> {
+    #[account(mut, has_one = curve, has_one = trader)]
+    pub pack: Account<'info, Pack>,
     #[account(has_one = pot_vault, has_one = token_mint)]
     pub curve: Account<'info, Curve>,
-    /// CHECK: matched against the ticket; receives the ticket's rent.
-    #[account(mut)]
+    /// CHECK: matched against the pack.
     pub trader: UncheckedAccount<'info>,
     #[account(mut)]
     pub pot_vault: InterfaceAccount<'info, TokenAccount>,
@@ -1299,7 +1334,7 @@ pub struct ResolveTicket<'info> {
     pub trader_token: InterfaceAccount<'info, TokenAccount>,
     pub token_mint: InterfaceAccount<'info, Mint>,
     pub token_program: Program<'info, Token>,
-    /// CHECK: the ORAO randomness account for the ticket's seed, checked by address and
+    /// CHECK: the ORAO randomness account for the draw's seed, checked by address and
     /// parsed in the handler.
     pub randomness: UncheckedAccount<'info>,
 }
@@ -1346,17 +1381,19 @@ pub enum GachaError {
     InsufficientLiquidity,
     #[msg("This strategy only supports exact-in trades")]
     ExactOutUnsupported,
-    #[msg("extra must be empty, [0], or [1] on a buy")]
+    #[msg("extra must be empty, or a pack index (two bytes, little-endian) on a buy")]
     BadExtra,
-    #[msg("The trader's ticket is still armed; resolve it first")]
-    TicketPending,
-    #[msg("The ticket is not armed")]
-    TicketNotArmed,
-    #[msg("An armed ticket can only be closed by resolving it")]
-    TicketArmed,
-    #[msg("The ticket's randomness has not been requested from the VRF, or not fulfilled yet")]
+    #[msg("The pack has no room for another draw; open another pack")]
+    PackFull,
+    #[msg("No such draw")]
+    NoSuchDraw,
+    #[msg("That draw is empty or already opened")]
+    DrawNotArmed,
+    #[msg("Open every draw before closing the pack")]
+    PackHasUnopenedDraws,
+    #[msg("The draw's randomness has not been requested from the VRF, or not fulfilled yet")]
     NotFulfilled,
-    #[msg("Randomness for this ticket's next seed was requested before the buy")]
+    #[msg("Randomness for this draw's seed was requested before the buy")]
     SeedAlreadyRequested,
     #[msg("Arithmetic overflow")]
     Overflow,
