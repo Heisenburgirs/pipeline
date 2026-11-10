@@ -158,8 +158,8 @@ as usual. Nothing about a trade's accounts depends on whether the market has gra
 | | Address |
 |---|---|
 | Program | [`4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA`](https://orbmarkets.io/address/4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA/history?cluster=devnet) |
-| Demo market (the default preset above, against a 6-decimal test quote) | [`CpA1g1zdf2JXC9mxqqdc48nJg63Z8FYdsqZQvLpiaLdS`](https://orbmarkets.io/address/CpA1g1zdf2JXC9mxqqdc48nJg63Z8FYdsqZQvLpiaLdS/history?cluster=devnet) |
-| Demo token | `G1WDvVUudx95ccfRTjT9rGL4BDTZa85oG3Rq7hCoimed` |
+| Demo market (the default preset above with a 0.3% creator fee, against a 6-decimal test quote) | [`DAWRtFaUTuRWrH3SVtJetCvYBbvYvkR4tneMqtCwZsEf`](https://orbmarkets.io/address/DAWRtFaUTuRWrH3SVtJetCvYBbvYvkR4tneMqtCwZsEf/history?cluster=devnet) |
+| Demo token | `8b8uvp9JWeycbu9ZLScrZdSVpDsRkhr8LtiiPhhKDJkn` |
 
 The program is registered with the router. `scripts/devnet/strategies.ts` is what registered
 it and created the demo market; run it with `ONLY=launch` against any cluster where

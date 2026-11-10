@@ -335,9 +335,38 @@ async function launchDemo(wallet: KeyPairSigner) {
         wallet, LAUNCH_PROGRAM, launch, [quoteMint, tokenMint.address], [quoteVault, tokenVault], true, amount, new Uint8Array(),
     );
     const price = Number(amount) / Number(received);
-    log(`launch-curve buy: $${Number(amount) / 1e6} -> ${(Number(received) / 1e6).toFixed(2)} tokens at $${price.toFixed(4)} each (quote ${quote}, received ${received}) ${signature}`);
+    log(`launch-curve buy: ${Number(amount) / 1e6} -> ${(Number(received) / 1e6).toFixed(2)} tokens at ${price.toFixed(4)} each (quote ${quote}, received ${received}) ${signature}`);
     if (quote !== received) throw new Error('received differs from quote');
-    return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature };
+
+    // The wallet is both this market's creator and the program's upgrade authority, so
+    // one claim_fees collects the 0.3% and the 0.2% of the buy: $0.50 in total.
+    const walletQuote = await ata(wallet.address, quoteMint);
+    const quoteBefore = await tokenBalance(walletQuote);
+    const [programData] = await getProgramDerivedAddress({
+        programAddress: address('BPFLoaderUpgradeab1e11111111111111111111111'),
+        seeds: [encoder.encode(LAUNCH_PROGRAM)],
+    });
+    const claim: Instruction = {
+        programAddress: LAUNCH_PROGRAM,
+        accounts: [
+            { address: wallet.address, role: AccountRole.READONLY_SIGNER },
+            { address: launch, role: AccountRole.WRITABLE },
+            { address: quoteVault, role: AccountRole.WRITABLE },
+            { address: tokenVault, role: AccountRole.WRITABLE },
+            { address: walletQuote, role: AccountRole.WRITABLE },
+            { address: await ata(wallet.address, tokenMint.address), role: AccountRole.WRITABLE },
+            { address: quoteMint, role: AccountRole.READONLY },
+            { address: tokenMint.address, role: AccountRole.READONLY },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: programData, role: AccountRole.READONLY },
+        ],
+        data: hex('52fbe99c0c34b8ca'),
+    };
+    const claimSignature = await send(wallet, [claim]);
+    const claimed = (await tokenBalance(walletQuote)) - quoteBefore;
+    log(`launch-curve claim_fees: ${Number(claimed) / 1e6} of fees collected (0.3% creator + 0.2% protocol) ${claimSignature}`);
+    return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature, claim: claimSignature, claimed };
 }
 
 // ------------------------------------------------------------------- gacha curve
