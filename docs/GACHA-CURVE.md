@@ -139,8 +139,8 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.5% swap fee to the pot, 2% gacha fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf`](https://orbmarkets.io/address/3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf/history?cluster=devnet) |
-| Demo token | `5ZMhj2g7R1QMY7ZQuZXX2e7HeBg18UCnAZ7363Skr7XC` |
+| Demo market (0.5% swap fee to the pot, 2% gacha fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD`](https://orbmarkets.io/address/Feqj8KswVnRW6shaxSQhczHNWscqoWSvRRspAYLvaBfD/history?cluster=devnet) |
+| Demo token | `F4Tkeav4eLFkxBLqH6JUcXzYLJLjr8FSQ59s6xRMh8Nb` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the
 `launch-curve` branch registered it, created the demo market, made a gacha buy and
