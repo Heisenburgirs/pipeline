@@ -1,7 +1,8 @@
 # Gacha curve: a launchpad bonding curve with packs of prizes
 
 `programs/gacha-curve` is a Pipeline strategy that launches a token on a constant-product
-bonding curve with virtual reserves (the pump.fun shape) and adds a gacha. Every trade
+bonding curve with virtual reserves (the pump.fun shape) that graduates into a locked
+pool once it sells out, and adds a gacha. Every trade
 pays a small fee, split between a **pot** of the token, the curve itself, the token's
 creator and the launchpad. Every buy drops a free **draw** into one of the buyer's
 **packs**, and opening a draw is a chance at a prize from the pot sized to that buy. It
@@ -28,6 +29,18 @@ Pricing uses virtual reserves. With `x = virtual_quote + quote_reserve` and
 a sell of `t` gives `floor(x × t / (y + t))` quote, each capped at what the vault holds.
 `virtual_quote` sets the opening price together with the supply; `virtual_token` keeps the
 price finite as the supply sells out.
+
+### Graduation
+
+Only `curve_supply` tokens sell on the curve. The buy that takes the last of them
+graduates the market: it pays exactly for what is left, the market flips to a **pool**
+phase, and whatever remains of that buy's input trades on the new pool in the same
+swap. The quote raised plus the `supply − curve_supply` tokens held back become a plain
+constant-product pool on real reserves with a `pool_fee_bps` fee kept in the pool,
+owned by the market for good. This is the launch curve's mechanism exactly; see
+[`LAUNCH-CURVE.md`](LAUNCH-CURVE.md) for the maths and for presets such as a $100k start
+graduating at $1B. The pot keeps buying from whichever phase is live, and draws, fees
+and claims work the same on the pool.
 
 ### Fees
 
@@ -56,6 +69,7 @@ reflect every fee.
 | Field | Meaning |
 |---|---|
 | `supply: u64` | Tokens minted to the curve, in base units (6 decimals) |
+| `curve_supply: u64` | Tokens sold on the curve; the rest is held back for the pool |
 | `virtual_quote: u64` | Virtual quote reserve |
 | `virtual_token: u64` | Virtual token reserve |
 | `win_one_in: u32` | A draw wins with probability 1 in this many |
@@ -69,6 +83,7 @@ reflect every fee.
 | `jackpot_one_in: u32` | A draw hits the jackpot with probability 1 in this many; 0 disables it |
 | `jackpot_bps: u32` | Jackpot size, in basis points of the draw's purchase (1,000,000 is 100x) |
 | `max_jackpot_pot_bps: u16` | Cap on one jackpot, in basis points of the pot's balance |
+| `pool_fee_bps: u16` | Fee on pool trades after graduation, kept in the pool |
 
 Setup accounts after the router's fixed four: quote mint, token mint (writable, signer),
 quote vault `["quote_vault", curve]`, token vault `["token_vault", curve]`, pot vault

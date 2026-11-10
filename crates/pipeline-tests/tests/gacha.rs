@@ -21,8 +21,12 @@ const RANDOMNESS_V2_DISCRIMINATOR: [u8; 8] = [139, 239, 184, 215, 227, 86, 191, 
 /// Draws a pack holds.
 const PACK_DRAWS: usize = 16;
 
-/// One billion tokens with 6 decimals.
+/// One billion tokens with 6 decimals; pump.fun's shape sells 793.1M of them on the
+/// curve and holds the rest back for the pool.
 const SUPPLY: u64 = 1_000_000_000_000_000;
+const CURVE_SUPPLY: u64 = 793_100_000_000_000;
+const RESERVED: u64 = SUPPLY - CURVE_SUPPLY;
+const POOL_FEE_BPS: u16 = 0;
 /// 30 "SOL" of virtual quote reserve (the quote mint has 9 decimals).
 const VIRTUAL_QUOTE: u64 = 30_000_000_000;
 /// 280 million tokens of virtual token reserve.
@@ -50,6 +54,7 @@ const MAX_JACKPOT_POT_BPS: u16 = 5_000;
 #[derive(borsh::BorshSerialize)]
 struct InitParams {
     supply: u64,
+    curve_supply: u64,
     virtual_quote: u64,
     virtual_token: u64,
     win_one_in: u32,
@@ -63,11 +68,13 @@ struct InitParams {
     jackpot_one_in: u32,
     jackpot_bps: u32,
     max_jackpot_pot_bps: u16,
+    pool_fee_bps: u16,
 }
 
 fn params(creator: &Pubkey) -> InitParams {
     InitParams {
         supply: SUPPLY,
+        curve_supply: CURVE_SUPPLY,
         virtual_quote: VIRTUAL_QUOTE,
         virtual_token: VIRTUAL_TOKEN,
         win_one_in: WIN_ONE_IN,
@@ -81,6 +88,7 @@ fn params(creator: &Pubkey) -> InitParams {
         jackpot_one_in: JACKPOT_ONE_IN,
         jackpot_bps: JACKPOT_BPS,
         max_jackpot_pot_bps: MAX_JACKPOT_POT_BPS,
+        pool_fee_bps: POOL_FEE_BPS,
     }
 }
 
@@ -209,6 +217,24 @@ fn owed(env: &Env, m: &GachaMarket) -> (u64, u64, u64, u64) {
 fn curve_pack_nonce(env: &Env, m: &GachaMarket) -> u64 {
     let data = env.account_data(&m.curve);
     u64::from_le_bytes(data[296..304].try_into().unwrap())
+}
+
+/// Whether the curve has graduated into its pool.
+fn graduated(env: &Env, m: &GachaMarket) -> bool {
+    env.account_data(&m.curve)[314] == 1
+}
+
+/// The quoter's answer for an exact-in trade.
+fn quoted(env: &Env, m: &GachaMarket, buy: bool, amount: u64, extra: Vec<u8>) -> u64 {
+    let request = quote_request(m, buy, amount, None, extra);
+    let mut quoter = quoter_for(env, m, &[]);
+    let resolved = quoter
+        .resolve_accounts(&view(env, m), &request, |_, _| {})
+        .unwrap();
+    quoter
+        .quote(&view(env, m), &request, &resolved)
+        .unwrap()
+        .amount_out
 }
 
 /// `(index, nonce, draws, opened)` of a pack, or `None` if the account is closed.
@@ -649,8 +675,9 @@ fn market_creation_mints_a_fixed_supply_into_the_curve() {
     assert_eq!(env.token_balance(&m.token_vault), SUPPLY);
     assert_eq!(env.token_balance(&m.quote_vault), 0);
     assert_eq!(env.token_balance(&m.pot_vault), 0);
-    assert_eq!(reserves(&env, &m), (0, SUPPLY));
+    assert_eq!(reserves(&env, &m), (0, CURVE_SUPPLY));
     assert_eq!(curve_pack_nonce(&env, &m), 0);
+    assert!(!graduated(&env, &m));
 
     // The mint authority is gone and the supply is exactly what the curve holds.
     let mint = env.account_data(&m.token_mint);
@@ -688,7 +715,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
         expected,
         curve_out(
             VIRTUAL_QUOTE as u128,
-            (VIRTUAL_TOKEN + SUPPLY) as u128,
+            (VIRTUAL_TOKEN + CURVE_SUPPLY) as u128,
             net_in(amount)
         )
     );
@@ -724,7 +751,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     );
     assert_eq!(
         reserves(&env, &m),
-        (amount - claimable(amount), SUPPLY - expected - pot)
+        (amount - claimable(amount), CURVE_SUPPLY - expected - pot)
     );
     assert_eq!(owed(&env, &m), (creator_fee, 0, protocol_fee, 0));
     assert_eq!(env.token_balance(&m.quote_vault), amount);
@@ -768,7 +795,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
         reserves(&env, &m),
         (
             amount - claimable(amount) - expected_quote,
-            SUPPLY - expected - pot + sell - sell_fee - claimable(sell)
+            CURVE_SUPPLY - expected - pot + sell - sell_fee - claimable(sell)
         )
     );
     let (_, _, sell_creator, sell_protocol) = fees_on(sell);
@@ -884,7 +911,7 @@ fn a_buy_into_a_pack_pays_the_same_and_drops_a_draw() {
     );
     assert_eq!(
         reserves(&env, &m),
-        (amount - claimable(amount), SUPPLY - base - pot)
+        (amount - claimable(amount), CURVE_SUPPLY - base - pot)
     );
     let nonce = curve_pack_nonce(&env, &m);
     assert_eq!(pack(&env, &pack_key), Some((0, nonce, 1, 0)));
@@ -930,6 +957,87 @@ fn a_buy_into_a_pack_pays_the_same_and_drops_a_draw() {
         env.send(&[client::swap(&accounts, &odd)], &[&t.0]),
         "BadExtra",
     );
+}
+
+#[test]
+fn the_curve_graduates_into_a_pool_and_the_pot_keeps_buying() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    let t = trader(&mut env, &m, 300_000_000_000);
+    let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
+
+    // The pump.fun shape raises 85 quote; 100 (less fees) takes the whole curve and
+    // trades the rest on the new pool, pot leg included. The quoter prices it exactly.
+    let amount = 100_000_000_000;
+    let expected = quoted(&env, &m, true, amount, vec![]);
+    assert!(expected > CURVE_SUPPLY);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
+    let meta = env
+        .send(
+            &[client::swap(&accounts, &exact_in(amount, expected))],
+            &[&t.0],
+        )
+        .expect("graduating buy");
+    assert_eq!(env.token_balance(&trader_token), expected);
+    assert!(graduated(&env, &m));
+    assert!(meta.logs.iter().any(|l| l.starts_with("Program data:")));
+    let (quote_reserve, token_reserve) = reserves(&env, &m);
+    let pot = env.token_balance(&m.pot_vault);
+    assert!(pot > 0);
+    // The curve sold out at 85 quote; the pool opened with the held-back tokens and
+    // sold some of them to the buyer and the pot.
+    assert!(quote_reserve > 85_000_000_000);
+    assert_eq!(token_reserve, RESERVED - (expected - CURVE_SUPPLY) - pot);
+    assert_eq!(env.token_balance(&m.token_vault), token_reserve);
+
+    // Pool trades: a buy and a sell, both matching the quoter, both feeding the pot.
+    let buy_amount = 1_000_000_000;
+    let buy_out = quoted(&env, &m, true, buy_amount, vec![]);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
+    env.send(
+        &[client::swap(&accounts, &exact_in(buy_amount, buy_out))],
+        &[&t.0],
+    )
+    .expect("pool buy");
+    assert!(env.token_balance(&m.pot_vault) > pot);
+    let pot = env.token_balance(&m.pot_vault);
+    let sell_amount = buy_out / 2;
+    let sell_out = quoted(&env, &m, false, sell_amount, vec![]);
+    let accounts = swap_accounts(&m, &trader_key, false, None, &trader_quote, &trader_token);
+    let before = env.token_balance(&trader_quote);
+    env.send(
+        &[client::swap(&accounts, &exact_in(sell_amount, sell_out))],
+        &[&t.0],
+    )
+    .expect("pool sell");
+    assert_eq!(env.token_balance(&trader_quote) - before, sell_out);
+    assert_eq!(
+        env.token_balance(&m.pot_vault),
+        pot + fees_on(sell_amount).0
+    );
+
+    // Draws keep working on the pool.
+    let pack_out = quoted(&env, &m, true, buy_amount, 0u16.to_le_bytes().to_vec());
+    let randomness = next_randomness(&env, &m, &trader_key, 0);
+    let accounts = swap_accounts(
+        &m,
+        &trader_key,
+        true,
+        Some((0, randomness)),
+        &trader_quote,
+        &trader_token,
+    );
+    env.send(
+        &[
+            open_pack_ix(&m, &trader_key, 0),
+            client::swap(&accounts, &pack_args(buy_amount, pack_out, 0)),
+        ],
+        &[&t.0],
+    )
+    .expect("pack buy on the pool");
+    let pack_key = pack_pda(&m.curve, &trader_key, 0);
+    assert_eq!(pack(&env, &pack_key).unwrap().2, 1);
+    assert_eq!(draw(&env, &pack_key, 0).1, pack_out);
 }
 
 #[test]
@@ -1291,7 +1399,7 @@ fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_launchpad() 
     // Claims never touch the reserves or the pot, and trading continues on them.
     let (quote_reserve, token_reserve) = reserves(&env, &m);
     assert_eq!(env.token_balance(&m.quote_vault), quote_reserve);
-    assert_eq!(env.token_balance(&m.token_vault), token_reserve);
+    assert_eq!(env.token_balance(&m.token_vault), token_reserve + RESERVED);
     let (got, _) = price_buy(&env, &m, 1_000_000_000);
     let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     env.send(

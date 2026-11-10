@@ -4,7 +4,12 @@
 //! (the pump.fun shape) against a quote token such as wrapped SOL. The strategy mints
 //! the whole supply into its own vault at market creation and then gives up the mint
 //! authority, so the supply is fixed. Buys move quote into the curve and tokens out;
-//! sells do the reverse. Every trade reprices the curve.
+//! sells do the reverse. Every trade reprices the curve. Only `curve_supply` tokens
+//! sell on the curve: the buy that takes the last of them **graduates** the market, and
+//! the quote raised plus the `supply − curve_supply` tokens held back become a plain
+//! constant-product pool with real reserves and a `pool_fee_bps` fee kept in the pool,
+//! owned by the market for good, exactly as in `programs/launch-curve` (whose docs
+//! derive the parameters). The pot keeps buying from whichever phase is live.
 //!
 //! Every trade pays a fee from its input, split four ways. `pot_fee_bps` goes to the
 //! **pot**: on a buy it is spent on the curve and the tokens it buys go to the pot, on a
@@ -114,7 +119,7 @@ pub mod gacha_curve {
         curve.token_vault = ctx.accounts.token_vault.key();
         curve.pot_vault = ctx.accounts.pot_vault.key();
         curve.quote_reserve = 0;
-        curve.token_reserve = params.supply;
+        curve.token_reserve = params.curve_supply;
         curve.virtual_quote = params.virtual_quote;
         curve.virtual_token = params.virtual_token;
         curve.win_one_in = params.win_one_in;
@@ -133,6 +138,11 @@ pub mod gacha_curve {
         curve.jackpot_bps = params.jackpot_bps;
         curve.max_jackpot_pot_bps = params.max_jackpot_pot_bps;
         curve.pack_nonce = 0;
+        curve.curve_supply = params.curve_supply;
+        curve.pool_fee_bps = params.pool_fee_bps;
+        curve.graduated = false;
+        curve.graduation_slot = 0;
+        curve.supply = params.supply;
         curve.market_signer = expected_signer;
         curve.bump = ctx.bumps.curve;
         Ok(())
@@ -318,41 +328,27 @@ pub mod gacha_curve {
             )?;
         }
 
-        // Move the recorded reserves by the trade itself, not from vault balances, so
-        // tokens sent straight to a vault stay out of the price.
+        // Record the reserves the trade produced, never vault balances, so tokens sent
+        // straight to a vault stay out of the price.
         let curve = &mut ctx.accounts.curve;
-        let claimable = priced.creator_fee + priced.protocol_fee;
-        match kind {
-            TradeKind::Buy { .. } => {
-                curve.quote_reserve = curve
-                    .quote_reserve
-                    .checked_add(priced.quote.amount_in - claimable)
-                    .ok_or(GachaError::Overflow)?;
-                curve.token_reserve -= priced.quote.amount_out + priced.pot_out;
-                curve.creator_owed_quote = curve
-                    .creator_owed_quote
-                    .checked_add(priced.creator_fee)
-                    .ok_or(GachaError::Overflow)?;
-                curve.protocol_owed_quote = curve
-                    .protocol_owed_quote
-                    .checked_add(priced.protocol_fee)
-                    .ok_or(GachaError::Overflow)?;
-            }
-            TradeKind::Sell => {
-                curve.token_reserve = curve
-                    .token_reserve
-                    .checked_add(priced.quote.amount_in - priced.pot_in - claimable)
-                    .ok_or(GachaError::Overflow)?;
-                curve.quote_reserve -= priced.quote.amount_out;
-                curve.creator_owed_token = curve
-                    .creator_owed_token
-                    .checked_add(priced.creator_fee)
-                    .ok_or(GachaError::Overflow)?;
-                curve.protocol_owed_token = curve
-                    .protocol_owed_token
-                    .checked_add(priced.protocol_fee)
-                    .ok_or(GachaError::Overflow)?;
-            }
+        let graduated_now = priced.next.graduated && !curve.graduated;
+        curve.quote_reserve = priced.next.quote_reserve;
+        curve.token_reserve = priced.next.token_reserve;
+        curve.creator_owed_quote = priced.next.creator_owed_quote;
+        curve.creator_owed_token = priced.next.creator_owed_token;
+        curve.protocol_owed_quote = priced.next.protocol_owed_quote;
+        curve.protocol_owed_token = priced.next.protocol_owed_token;
+        curve.graduated = priced.next.graduated;
+        if graduated_now {
+            curve.graduation_slot = Clock::get()?.slot;
+            emit!(Graduated {
+                curve: curve.key(),
+                token_mint: curve.token_mint,
+                quote_raised: priced.raised,
+                pool_quote: curve.quote_reserve,
+                pool_token: curve.token_reserve,
+                slot: curve.graduation_slot,
+            });
         }
         Ok(())
     }
@@ -542,6 +538,9 @@ pub mod gacha_curve {
 pub struct InitParams {
     /// Tokens minted to the curve, in base units (6 decimals).
     pub supply: u64,
+    /// Tokens sold on the curve. The rest, `supply − curve_supply`, is held back and
+    /// becomes the pool's token side at graduation.
+    pub curve_supply: u64,
     /// Virtual quote reserve: sets the opening price together with the supply.
     pub virtual_quote: u64,
     /// Virtual token reserve added to the real one when pricing, so the price stays
@@ -572,12 +571,21 @@ pub struct InitParams {
     pub jackpot_bps: u32,
     /// Cap on a jackpot, in basis points of the pot's balance.
     pub max_jackpot_pot_bps: u16,
+    /// Fee on pool trades after graduation, in basis points of the input, kept in the
+    /// pool.
+    pub pool_fee_bps: u16,
 }
 
 impl InitParams {
     fn validate(&self) -> Result<()> {
         require!(self.supply > 0, GachaError::BadInitData);
+        require!(
+            self.curve_supply > 0 && self.curve_supply < self.supply,
+            GachaError::BadInitData
+        );
         require!(self.virtual_quote > 0, GachaError::BadInitData);
+        require!(self.virtual_token > 0, GachaError::BadInitData);
+        require!((self.pool_fee_bps as u128) < BPS, GachaError::BadInitData);
         require!(
             self.creator_fee_bps <= MAX_CREATOR_FEE_BPS,
             GachaError::BadInitData
@@ -619,7 +627,9 @@ pub struct Curve {
     pub pot_vault: Pubkey,
     /// Quote tokens the curve holds from trades.
     pub quote_reserve: u64,
-    /// Tokens left for sale in the token vault.
+    /// Tokens for sale in the current phase: what is left of `curve_supply` on the
+    /// curve, then the pool's token reserve. The token vault also holds the held-back
+    /// `supply − curve_supply` until graduation.
     pub token_reserve: u64,
     pub virtual_quote: u64,
     pub virtual_token: u64,
@@ -647,6 +657,16 @@ pub struct Curve {
     /// Packs opened so far; each gets the next value as its nonce, so that seeds never
     /// repeat even when a pack is closed and another opened.
     pub pack_nonce: u64,
+    /// Tokens sold on the curve; the rest is held back for the pool.
+    pub curve_supply: u64,
+    /// Fee on pool trades after graduation, kept in the pool.
+    pub pool_fee_bps: u16,
+    /// False while the curve is selling; true for good once it has sold out.
+    pub graduated: bool,
+    /// Slot of the graduating trade (0 before).
+    pub graduation_slot: u64,
+    /// Tokens minted.
+    pub supply: u64,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
@@ -687,6 +707,18 @@ pub struct Draw {
     pub slot: u64,
     /// The ORAO randomness seed: `draw_seed(pack, nonce, index)`.
     pub seed: [u8; 32],
+}
+
+#[event]
+pub struct Graduated {
+    pub curve: Pubkey,
+    pub token_mint: Pubkey,
+    /// Quote the curve raised in total, before the graduating buy's pool leg.
+    pub quote_raised: u64,
+    /// The pool's reserves right after the graduating trade.
+    pub pool_quote: u64,
+    pub pool_token: u64,
+    pub slot: u64,
 }
 
 #[event]
@@ -782,13 +814,14 @@ impl TradeKind {
 
 /// A priced trade: what the router sees, what the pot receives (tokens the pot fee
 /// bought from the token vault on a buy, `pot_out`, or the pot fee in tokens on a sell,
-/// `pot_in`), and the fees accrued for the creator and the protocol in the input mint.
+/// `pot_in`), the state the trade leaves behind, and (when it graduates the market)
+/// what the curve raised in total.
 struct Priced {
     quote: psi::QuoteResult,
     pot_out: u64,
     pot_in: u64,
-    creator_fee: u64,
-    protocol_fee: u64,
+    next: Curve,
+    raised: u64,
 }
 
 /// The four fees on one trade, each rounded up.
@@ -819,6 +852,11 @@ impl Curve {
         Ok(fees)
     }
 
+    /// The held-back tokens that become the pool's token side at graduation.
+    pub fn reserved(&self) -> u64 {
+        self.supply - self.curve_supply
+    }
+
     /// The single pricing function used by both `pipeline_quote` and `pipeline_swap`.
     fn quote(&self, trade: &psi::TradeRequest) -> Result<Priced> {
         require!(
@@ -826,54 +864,128 @@ impl Curve {
             GachaError::ExactOutUnsupported
         );
         let kind = TradeKind::of(trade)?;
-        let x = self.virtual_quote as u128 + self.quote_reserve as u128;
-        let y = self.virtual_token as u128 + self.token_reserve as u128;
-        match kind {
+        let mut next = self.clone();
+        let fees = self.fees_on(trade.amount)?;
+        let net = trade.amount - fees.total();
+        let mut raised = 0;
+        let (out, pot_out, pot_in) = match kind {
             TradeKind::Buy { .. } => {
-                require!(self.token_reserve > 0, GachaError::InsufficientLiquidity);
+                require!(next.token_reserve > 0, GachaError::InsufficientLiquidity);
                 // All four fees come off the input; a gacha buy pays nothing extra. The
-                // pot fee buys for the pot from the curve as it stands after the base
-                // buy, the curve fee just stays in the quote reserve, and the creator's
-                // and protocol's accrue in the quote vault until claimed.
-                let fees = self.fees_on(trade.amount)?;
-                let base = trade.amount - fees.total();
-                let out = out_given_in(x, y, base).min(self.token_reserve as u128) as u64;
-                let x_after = x + base as u128;
-                let y_after = y - out as u128;
-                let left = (self.token_reserve - out) as u128;
-                let pot_out = out_given_in(x_after, y_after, fees.pot).min(left) as u64;
-                Ok(Priced {
-                    quote: psi::QuoteResult {
-                        amount_in: trade.amount,
-                        amount_out: out,
-                    },
-                    pot_out,
-                    pot_in: 0,
-                    creator_fee: fees.creator,
-                    protocol_fee: fees.protocol,
-                })
+                // buyer's own purchase first, then the pot's with the pot fee, from
+                // whichever phase is live; the curve fee stays in the quote reserve and
+                // the creator's and protocol's accrue in the quote vault until claimed.
+                next.creator_owed_quote = add(next.creator_owed_quote, fees.creator)?;
+                next.protocol_owed_quote = add(next.protocol_owed_quote, fees.protocol)?;
+                let out = next.buy(net, &mut raised)?;
+                let pot_out = next.buy(fees.pot, &mut raised)?;
+                next.quote_reserve = add(next.quote_reserve, fees.curve)?;
+                (out, pot_out, 0)
             }
             TradeKind::Sell => {
-                require!(self.quote_reserve > 0, GachaError::InsufficientLiquidity);
+                require!(next.quote_reserve > 0, GachaError::InsufficientLiquidity);
                 // All four fees are taken in tokens: the pot fee goes to the pot, the
                 // curve fee stays in the token reserve unpaid, the creator's and
                 // protocol's accrue in the token vault, and the rest sells.
-                let fees = self.fees_on(trade.amount)?;
-                let net = trade.amount - fees.total();
-                let out = out_given_in(y, x, net).min(self.quote_reserve as u128) as u64;
-                Ok(Priced {
-                    quote: psi::QuoteResult {
-                        amount_in: trade.amount,
-                        amount_out: out,
-                    },
-                    pot_out: 0,
-                    pot_in: fees.pot,
-                    creator_fee: fees.creator,
-                    protocol_fee: fees.protocol,
-                })
+                next.creator_owed_token = add(next.creator_owed_token, fees.creator)?;
+                next.protocol_owed_token = add(next.protocol_owed_token, fees.protocol)?;
+                let out = next.sell(net)?;
+                next.token_reserve = add(next.token_reserve, fees.curve)?;
+                (out, 0, fees.pot)
+            }
+        };
+        Ok(Priced {
+            quote: psi::QuoteResult {
+                amount_in: trade.amount,
+                amount_out: out,
+            },
+            pot_out,
+            pot_in,
+            next,
+            raised,
+        })
+    }
+
+    /// Spends `amount` of quote in the live phase and returns the tokens it buys. A buy
+    /// that takes the last curve token pays exactly for it, graduates the market, and
+    /// spends the rest on the new pool. `raised` is set to the curve's total raise
+    /// when that happens.
+    fn buy(&mut self, amount: u64, raised: &mut u64) -> Result<u64> {
+        let mut out: u64 = 0;
+        let mut remaining = amount;
+        if !self.graduated && remaining > 0 {
+            let x = self.virtual_quote as u128 + self.quote_reserve as u128;
+            let y = self.virtual_token as u128 + self.token_reserve as u128;
+            let curve_out = out_given_in(x, y, remaining);
+            if curve_out < self.token_reserve as u128 {
+                out = curve_out as u64;
+                self.quote_reserve = add(self.quote_reserve, remaining)?;
+                self.token_reserve -= out;
+                remaining = 0;
+            } else {
+                let left = self.token_reserve;
+                let cost = cost_for(x, y, left)?.min(remaining);
+                out = left;
+                self.quote_reserve = add(self.quote_reserve, cost)?;
+                self.token_reserve = self.reserved();
+                self.graduated = true;
+                *raised = self.quote_reserve;
+                remaining -= cost;
             }
         }
+        if self.graduated && remaining > 0 {
+            require!(self.quote_reserve > 0, GachaError::InsufficientLiquidity);
+            let net = after_fee(remaining, self.pool_fee_bps)?;
+            let pool_out =
+                pool_out_given_in(self.quote_reserve as u128, self.token_reserve as u128, net);
+            out = add(out, pool_out)?;
+            self.quote_reserve = add(self.quote_reserve, remaining)?;
+            self.token_reserve -= pool_out;
+        }
+        Ok(out)
     }
+
+    /// Sells `amount` of tokens in the live phase and returns the quote it pays.
+    fn sell(&mut self, amount: u64) -> Result<u64> {
+        let out = if !self.graduated {
+            let x = self.virtual_quote as u128 + self.quote_reserve as u128;
+            let y = self.virtual_token as u128 + self.token_reserve as u128;
+            out_given_in(y, x, amount).min(self.quote_reserve as u128) as u64
+        } else {
+            let net = after_fee(amount, self.pool_fee_bps)?;
+            pool_out_given_in(self.token_reserve as u128, self.quote_reserve as u128, net)
+        };
+        self.token_reserve = add(self.token_reserve, amount)?;
+        self.quote_reserve -= out;
+        Ok(out)
+    }
+}
+
+/// A pool trade on real reserves: [`out_given_in`], never the whole reserve.
+fn pool_out_given_in(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u64 {
+    out_given_in(reserve_in, reserve_out, amount_in).min(reserve_out.saturating_sub(1)) as u64
+}
+
+/// The exact quote needed to take `out` from a curve at `(x, y)`:
+/// `ceil(x × out / (y − out))`. Fails if it does not fit in a u64.
+pub fn cost_for(x: u128, y: u128, out: u64) -> Result<u64> {
+    let left = y
+        .checked_sub(out as u128)
+        .filter(|left| *left > 0)
+        .ok_or(GachaError::InsufficientLiquidity)?;
+    let (q, r) = mul_div(x, out as u128, left);
+    let cost = q + (r > 0) as u128;
+    u64::try_from(cost).map_err(|_| GachaError::Overflow.into())
+}
+
+/// `amount` less the pool fee on it.
+fn after_fee(amount: u64, fee_bps: u16) -> Result<u64> {
+    let fee = fees::ceil_bps(amount, fee_bps as u64).ok_or(GachaError::Overflow)?;
+    Ok(amount - fee)
+}
+
+fn add(a: u64, b: u64) -> Result<u64> {
+    a.checked_add(b).ok_or(GachaError::Overflow.into())
 }
 
 /// `floor(reserve_out × in / (reserve_in + in))` on virtual reserves.
@@ -1307,7 +1419,7 @@ pub struct OpenPack<'info> {
         seeds = [b"pack", curve.key().as_ref(), trader.key().as_ref(), &index.to_le_bytes()],
         bump,
     )]
-    pub pack: Account<'info, Pack>,
+    pub pack: Box<Account<'info, Pack>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1316,15 +1428,15 @@ pub struct ClosePack<'info> {
     #[account(mut)]
     pub trader: Signer<'info>,
     #[account(mut, has_one = trader, close = trader)]
-    pub pack: Account<'info, Pack>,
+    pub pack: Box<Account<'info, Pack>>,
 }
 
 #[derive(Accounts)]
 pub struct OpenDraw<'info> {
     #[account(mut, has_one = curve, has_one = trader)]
-    pub pack: Account<'info, Pack>,
+    pub pack: Box<Account<'info, Pack>>,
     #[account(has_one = pot_vault, has_one = token_mint)]
-    pub curve: Account<'info, Curve>,
+    pub curve: Box<Account<'info, Curve>>,
     /// CHECK: matched against the pack.
     pub trader: UncheckedAccount<'info>,
     #[account(mut)]
