@@ -65,16 +65,22 @@ reflect every fee.
 | `curve_fee_bps: u16` | Fee on every trade, left in the curve's reserves |
 | `creator_fee_bps: u16` | Fee on every trade for the creator, at most 500 |
 | `creator: Pubkey` | Who claims the creator fee |
+| `jackpot_one_in: u32` | A gacha buy hits the jackpot with probability 1 in this many; 0 disables it |
+| `jackpot_bps: u32` | Jackpot size, in basis points of the buyer's base output (1,000,000 is 100x) |
+| `max_jackpot_pot_bps: u16` | Cap on one jackpot, in basis points of the pot's balance |
 
 Setup accounts after the router's fixed four: quote mint, token mint (writable, signer),
 quote vault `["quote_vault", curve]`, token vault `["token_vault", curve]`, pot vault
 `["pot", curve]`, the quote mint's token program, SPL Token. The market state is the curve
 PDA `["curve", token_mint]`.
 
-Opting in costs nothing, so assume every buy does and keep the expected payout at or
-below the pot fee: `bonus_bps / win_one_in ≤ pot_fee_bps`. For example a 0.3% pot fee
-supports a 1-in-100 chance of a 20% bonus (an expected 0.2%), and sells only add to the
-pot. `max_win_pot_bps` stops a hot streak from emptying it.
+Opting in costs nothing, so assume every buy does and keep the expected payout of both
+tiers at or below the pot fee: `bonus_bps / win_one_in + jackpot_bps / jackpot_one_in ≤
+pot_fee_bps`. The presets spend the 0.3% exactly: a 1-in-100 chance of a 20% bonus
+(0.2%) plus a 1-in-100,000 chance of a 100x jackpot (0.1%), and sells only add to the
+pot. The caps, `max_win_pot_bps` and `max_jackpot_pot_bps`, stop a hot streak or an early
+jackpot from emptying it: a $100 buy's jackpot is $10,000 of tokens only once the pot
+holds $20,000, and half the pot before that.
 
 ## A gacha buy
 
@@ -100,13 +106,16 @@ the quote mint follow as usual.
 
 Anyone can call `resolve_ticket` once the chain has a block at or after the ticket's
 reveal slot (`buy slot + reveal_delay_slots`). The roll is
-`sha256(block hash ‖ ticket ‖ buy slot)` read as a little-endian `u64`; the ticket wins when
-it is a multiple of `win_one_in`. The block hash is that of the first block at or after the
+`sha256(block hash ‖ ticket ‖ buy slot)` read as a little-endian `u64`; a multiple of
+`jackpot_one_in` is a jackpot, otherwise a multiple of `win_one_in` is a win. The block hash is that of the first block at or after the
 reveal slot, read from the SlotHashes sysvar, so a skipped slot moves to the next block
 rather than blocking resolution.
 
-A win pays `min(bonus_bps × stake, max_win_pot_bps × pot)` from the pot to any token
-account of the launched mint owned by the ticket's trader. Win or lose, the ticket closes
+A win pays `min(bonus_bps × stake, max_win_pot_bps × pot)` and a jackpot
+`min(jackpot_bps × stake, max_jackpot_pot_bps × pot)` from the pot to any token account
+of the launched mint owned by the ticket's trader. The jackpot scales with the purchase
+rather than being a flat share of the pot, so tiny buys are not the cheapest way to farm
+tickets. Win or lose, the ticket closes
 and its rent returns to the trader. The outcome is published as a `TicketResolved` event.
 
 **Tickets expire.** A ticket must be resolved within 400 slots of its reveal slot
@@ -156,7 +165,7 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 10-slot reveal, 9-decimal test quote) | [`6PAghGiJnzdc4ico6deYxREJrnwbnAbHtmf3kfupH3gS`](https://orbmarkets.io/address/6PAghGiJnzdc4ico6deYxREJrnwbnAbHtmf3kfupH3gS/history?cluster=devnet) |
+| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, 10-slot reveal, 9-decimal test quote) | [`6PAghGiJnzdc4ico6deYxREJrnwbnAbHtmf3kfupH3gS`](https://orbmarkets.io/address/6PAghGiJnzdc4ico6deYxREJrnwbnAbHtmf3kfupH3gS/history?cluster=devnet) |
 | Demo token | `2of2igSy6ZGScxCqZoxS95exyAoqkHngn4nk4XZNmync` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the

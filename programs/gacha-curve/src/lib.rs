@@ -18,9 +18,10 @@
 //! The gacha is opt-in per buy and costs nothing extra. A buyer who sets the first byte
 //! of the trade's `extra` to 1 has their ticket armed with the slot of the buy. After
 //! `reveal_delay_slots`, anyone may resolve the ticket: the hash of the first block at
-//! or after the reveal slot decides a 1-in-`win_one_in` roll, and a win pays
-//! `bonus_bps` of the buyer's base output from the pot, capped at `max_win_pot_bps` of
-//! the pot.
+//! or after the reveal slot decides the roll. A 1-in-`win_one_in` win pays `bonus_bps`
+//! of the buyer's base output from the pot, capped at `max_win_pot_bps` of the pot. A
+//! rarer 1-in-`jackpot_one_in` **jackpot** pays `jackpot_bps` of the base output, a
+//! multiple of it rather than a share, capped at `max_jackpot_pot_bps` of the pot.
 //!
 //! Why the two-step reveal: a roll decided inside the buy transaction can be filtered
 //! for free. A trader sets `min_amount_out` to the jackpot and lets losing rolls
@@ -122,6 +123,9 @@ pub mod gacha_curve {
         curve.creator_owed_token = 0;
         curve.protocol_owed_quote = 0;
         curve.protocol_owed_token = 0;
+        curve.jackpot_one_in = params.jackpot_one_in;
+        curve.jackpot_bps = params.jackpot_bps;
+        curve.max_jackpot_pot_bps = params.max_jackpot_pot_bps;
         curve.market_signer = expected_signer;
         curve.bump = ctx.bumps.curve;
         Ok(())
@@ -364,6 +368,7 @@ pub mod gacha_curve {
 
         let mut outcome = Outcome {
             won: false,
+            jackpot: false,
             expired,
             payout: 0,
             slot_used: 0,
@@ -375,10 +380,12 @@ pub mod gacha_curve {
             )?
             .ok_or(GachaError::TooEarly)?;
             outcome.slot_used = slot_used;
-            outcome.won = roll(&hash, &ticket.key(), ticket.slot, curve.win_one_in);
+            let tier = roll(&hash, &ticket.key(), ticket.slot, curve);
+            outcome.won = tier != Tier::Lose;
+            outcome.jackpot = tier == Tier::Jackpot;
             if outcome.won {
                 let pot_balance = ctx.accounts.pot_vault.amount;
-                outcome.payout = payout(ticket.stake, pot_balance, curve);
+                outcome.payout = payout(ticket.stake, pot_balance, curve, tier);
             }
         }
 
@@ -405,6 +412,7 @@ pub mod gacha_curve {
             trader: ticket.trader,
             stake: ticket.stake,
             won: outcome.won,
+            jackpot: outcome.jackpot,
             expired: outcome.expired,
             payout: outcome.payout,
             slot_used: outcome.slot_used,
@@ -514,6 +522,12 @@ pub struct InitParams {
     pub creator_fee_bps: u16,
     /// Who claims the creator fee.
     pub creator: Pubkey,
+    /// A gacha buy hits the jackpot with probability 1 in this many; 0 disables it.
+    pub jackpot_one_in: u32,
+    /// Jackpot size in basis points of the buyer's base output (1,000,000 = 100x).
+    pub jackpot_bps: u32,
+    /// Cap on a jackpot, in basis points of the pot's balance.
+    pub max_jackpot_pot_bps: u16,
 }
 
 impl InitParams {
@@ -539,6 +553,14 @@ impl InitParams {
             GachaError::BadInitData
         );
         require!(self.reveal_delay_slots >= 1, GachaError::BadInitData);
+        require!(
+            (self.max_jackpot_pot_bps as u128) <= BPS,
+            GachaError::BadInitData
+        );
+        require!(
+            self.jackpot_one_in == 0 || (self.jackpot_bps > 0 && self.max_jackpot_pot_bps > 0),
+            GachaError::BadInitData
+        );
         Ok(())
     }
 }
@@ -574,6 +596,10 @@ pub struct Curve {
     pub creator_owed_token: u64,
     pub protocol_owed_quote: u64,
     pub protocol_owed_token: u64,
+    /// Jackpot odds, size and cap; see [`InitParams`].
+    pub jackpot_one_in: u32,
+    pub jackpot_bps: u32,
+    pub max_jackpot_pot_bps: u16,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
@@ -609,6 +635,8 @@ pub struct TicketResolved {
     pub trader: Pubkey,
     pub stake: u64,
     pub won: bool,
+    /// Set with `won` when the roll hit the jackpot tier.
+    pub jackpot: bool,
     pub expired: bool,
     pub payout: u64,
     /// The slot whose block hash decided the roll (0 if expired).
@@ -617,6 +645,7 @@ pub struct TicketResolved {
 
 struct Outcome {
     won: bool,
+    jackpot: bool,
     expired: bool,
     payout: u64,
     slot_used: u64,
@@ -791,21 +820,40 @@ pub fn out_given_in(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u128
     mul_div(reserve_out, amount_in as u128, denominator).0
 }
 
-/// The bonus a winning ticket pays: `bonus_bps` of the stake, capped at
-/// `max_win_pot_bps` of the pot, and never more than the pot holds.
-pub fn payout(stake: u64, pot_balance: u64, curve: &Curve) -> u64 {
-    let bonus = (stake as u128 * curve.bonus_bps as u128 / BPS) as u64;
-    let cap = (pot_balance as u128 * curve.max_win_pot_bps as u128 / BPS) as u64;
-    bonus.min(cap).min(pot_balance)
+/// What a ticket's roll came to.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tier {
+    Lose,
+    Win,
+    Jackpot,
 }
 
-/// The roll: a 64-bit value from the block hash, the ticket and the buy slot, won when
-/// it is a multiple of `win_one_in`.
-pub fn roll(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64, win_one_in: u32) -> bool {
+/// What a ticket pays: the win or jackpot share of the stake, capped at the tier's
+/// share of the pot, and never more than the pot holds.
+pub fn payout(stake: u64, pot_balance: u64, curve: &Curve, tier: Tier) -> u64 {
+    let (prize_bps, cap_bps) = match tier {
+        Tier::Lose => return 0,
+        Tier::Win => (curve.bonus_bps as u128, curve.max_win_pot_bps as u128),
+        Tier::Jackpot => (curve.jackpot_bps as u128, curve.max_jackpot_pot_bps as u128),
+    };
+    let prize = (stake as u128 * prize_bps / BPS).min(u64::MAX as u128) as u64;
+    let cap = (pot_balance as u128 * cap_bps / BPS) as u64;
+    prize.min(cap).min(pot_balance)
+}
+
+/// The roll: a 64-bit value from the block hash, the ticket and the buy slot. A
+/// multiple of `jackpot_one_in` is a jackpot, else a multiple of `win_one_in` is a win.
+pub fn roll(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64, curve: &Curve) -> Tier {
     let digest =
         solana_sha256_hasher::hashv(&[hash, ticket.as_ref(), &buy_slot.to_le_bytes()]).to_bytes();
     let value = u64::from_le_bytes(digest[..8].try_into().unwrap());
-    value % win_one_in.max(1) as u64 == 0
+    if curve.jackpot_one_in > 0 && value % curve.jackpot_one_in as u64 == 0 {
+        Tier::Jackpot
+    } else if value % curve.win_one_in.max(1) as u64 == 0 {
+        Tier::Win
+    } else {
+        Tier::Lose
+    }
 }
 
 /// Reads the SlotHashes sysvar for the entry with the smallest slot that is at least

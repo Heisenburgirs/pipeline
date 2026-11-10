@@ -36,6 +36,11 @@ const POT_FEE_BPS: u16 = 30;
 const CURVE_FEE_BPS: u16 = 5;
 const CREATOR_FEE_BPS: u16 = 5;
 const PROTOCOL_FEE_BPS: u16 = 10;
+/// 1 in 100,000 hits the jackpot: 100x the base output, capped at half the pot. An
+/// expected 0.1%, so both tiers together cost the 0.3% the pot takes in.
+const JACKPOT_ONE_IN: u32 = 100_000;
+const JACKPOT_BPS: u32 = 1_000_000;
+const MAX_JACKPOT_POT_BPS: u16 = 5_000;
 
 /// Mirrors the strategy's `InitParams`.
 #[derive(borsh::BorshSerialize)]
@@ -51,6 +56,9 @@ struct InitParams {
     curve_fee_bps: u16,
     creator_fee_bps: u16,
     creator: [u8; 32],
+    jackpot_one_in: u32,
+    jackpot_bps: u32,
+    max_jackpot_pot_bps: u16,
 }
 
 fn params(creator: &Pubkey) -> InitParams {
@@ -66,6 +74,9 @@ fn params(creator: &Pubkey) -> InitParams {
         curve_fee_bps: CURVE_FEE_BPS,
         creator_fee_bps: CREATOR_FEE_BPS,
         creator: creator.to_bytes(),
+        jackpot_one_in: JACKPOT_ONE_IN,
+        jackpot_bps: JACKPOT_BPS,
+        max_jackpot_pot_bps: MAX_JACKPOT_POT_BPS,
     }
 }
 
@@ -409,26 +420,38 @@ fn current_slot(env: &Env) -> u64 {
     env.svm.get_sysvar::<solana_clock::Clock>().slot
 }
 
+const LOSE: u8 = 0;
+const WIN: u8 = 1;
+const JACKPOT: u8 = 2;
+
 /// The strategy's roll, mirrored: sha256(block hash ‖ ticket ‖ buy slot) as a little-
-/// endian u64, won when divisible by `WIN_ONE_IN`.
-fn wins(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64) -> bool {
+/// endian u64; a multiple of `JACKPOT_ONE_IN` is a jackpot, else a multiple of
+/// `WIN_ONE_IN` is a win.
+fn tier(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64) -> u8 {
     let digest = Sha256::new()
         .chain_update(hash)
         .chain_update(ticket.as_ref())
         .chain_update(buy_slot.to_le_bytes())
         .finalize();
-    u64::from_le_bytes(digest[..8].try_into().unwrap()) % WIN_ONE_IN as u64 == 0
+    let value = u64::from_le_bytes(digest[..8].try_into().unwrap());
+    if value % JACKPOT_ONE_IN as u64 == 0 {
+        JACKPOT
+    } else if value % WIN_ONE_IN as u64 == 0 {
+        WIN
+    } else {
+        LOSE
+    }
 }
 
-/// A block hash that makes `ticket` win (or lose) its roll.
-fn hash_that(ticket: &Pubkey, buy_slot: u64, should_win: bool) -> [u8; 32] {
+/// A block hash that gives `ticket` the wanted tier.
+fn hash_that(ticket: &Pubkey, buy_slot: u64, want: u8) -> [u8; 32] {
     (0u64..)
         .map(|nonce| {
             let mut hash = [0u8; 32];
             hash[..8].copy_from_slice(&nonce.to_le_bytes());
             hash
         })
-        .find(|hash| wins(hash, ticket, buy_slot) == should_win)
+        .find(|hash| tier(hash, ticket, buy_slot) == want)
         .unwrap()
 }
 
@@ -831,8 +854,8 @@ fn tickets_resolve_against_the_first_block_hash_at_or_after_the_reveal_slot() {
 
     // The reveal slot was skipped; the next block's hash decides. Make it a win, and
     // make the exact reveal slot's would-be hash a loss to prove which one was used.
-    let winning = hash_that(&ticket_key, buy_slot, true);
-    let losing = hash_that(&ticket_key, buy_slot, false);
+    let winning = hash_that(&ticket_key, buy_slot, WIN);
+    let losing = hash_that(&ticket_key, buy_slot, LOSE);
     set_slot_hashes(
         &mut env,
         &[
@@ -861,6 +884,45 @@ fn tickets_resolve_against_the_first_block_hash_at_or_after_the_reveal_slot() {
 }
 
 #[test]
+fn a_jackpot_pays_a_multiple_of_the_stake_capped_at_its_share_of_the_pot() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+
+    // Build a pot with other traders' buys, then the lucky one's.
+    for _ in 0..4 {
+        let other = trader(&mut env, &m, 10_000_000_000);
+        gacha_buy(&mut env, &m, &other, 5_000_000_000);
+    }
+    let t = trader(&mut env, &m, 10_000_000_000);
+    let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
+    let ticket_key = ticket_pda(&m.curve, &trader_key);
+    let buy_slot = current_slot(&env);
+    let (stake, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
+    let reveal = buy_slot + REVEAL_DELAY;
+    let pot_before = env.token_balance(&m.pot_vault);
+
+    env.svm.warp_to_slot(reveal + 1);
+    set_slot_hashes(
+        &mut env,
+        &[(reveal, hash_that(&ticket_key, buy_slot, JACKPOT))],
+    );
+    env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
+        .expect("resolve a jackpot");
+
+    // 100x the stake would be far more than the pot holds, so the cap binds: half the
+    // pot, which is still many times the regular win.
+    let prize = stake as u128 * JACKPOT_BPS as u128 / 10_000;
+    let cap = pot_before as u128 * MAX_JACKPOT_POT_BPS as u128 / 10_000;
+    let payout = prize.min(cap) as u64;
+    assert_eq!(payout, pot_before / 2);
+    let regular_cap = pot_before / 10;
+    assert!(payout > 4 * regular_cap);
+    assert_eq!(env.token_balance(&trader_token), stake + payout);
+    assert_eq!(env.token_balance(&m.pot_vault), pot_before - payout);
+    assert_eq!(ticket(&env, &ticket_key), None);
+}
+
+#[test]
 fn losing_tickets_pay_nothing_and_still_close() {
     let mut env = Env::new();
     let m = setup(&mut env);
@@ -874,7 +936,7 @@ fn losing_tickets_pay_nothing_and_still_close() {
     env.svm.warp_to_slot(reveal + 1);
     set_slot_hashes(
         &mut env,
-        &[(reveal, hash_that(&ticket_key, buy_slot, false))],
+        &[(reveal, hash_that(&ticket_key, buy_slot, LOSE))],
     );
     env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
         .expect("resolve a loss");
@@ -901,10 +963,7 @@ fn tickets_left_past_the_resolve_window_expire_without_a_payout() {
 
     // Even a winning hash pays nothing once the window has passed.
     env.svm.warp_to_slot(reveal + RESOLVE_WINDOW_SLOTS + 1);
-    set_slot_hashes(
-        &mut env,
-        &[(reveal, hash_that(&ticket_key, buy_slot, true))],
-    );
+    set_slot_hashes(&mut env, &[(reveal, hash_that(&ticket_key, buy_slot, WIN))]);
     env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
         .expect("expire");
     assert_eq!(env.token_balance(&trader_token), stake);
@@ -1003,10 +1062,7 @@ fn wins_are_paid_only_to_the_tickets_trader() {
     gacha_buy(&mut env, &m, &t, 1_000_000_000);
     let reveal = buy_slot + REVEAL_DELAY;
     env.svm.warp_to_slot(reveal + 1);
-    set_slot_hashes(
-        &mut env,
-        &[(reveal, hash_that(&ticket_key, buy_slot, true))],
-    );
+    set_slot_hashes(&mut env, &[(reveal, hash_that(&ticket_key, buy_slot, WIN))]);
 
     // A keeper pointing the payout at their own token account is refused.
     let keeper = Pubkey::new_unique();
