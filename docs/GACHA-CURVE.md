@@ -1,10 +1,10 @@
 # Gacha curve: a bonding-curve strategy with a prize pot
 
 `programs/gacha-curve` is a Pipeline strategy that launches a token on a constant-product
-bonding curve with virtual reserves (the pump.fun shape) and adds an opt-in gacha: a buyer
-can pay a small extra fee into a pot of the token and get a chance at a bonus from that
-pot. It is a worked example of a strategy with per-trader state and a custom action that
-pays out after the trade.
+bonding curve with virtual reserves (the pump.fun shape) and adds a gacha. Every trade
+pays a small fee into a **pot** of the token, and a buyer who opts in gets a chance at a
+bonus from that pot. It is a worked example of a strategy with per-trader state and a
+custom action that pays out after the trade.
 
 ## The market
 
@@ -18,13 +18,21 @@ Token-2022 mint). At creation the strategy:
 - creates the quote vault and the **pot** vault, all owned by the curve PDA.
 
 Mint index 0 is the quote token, 1 is the launched token. Only exact-in trades are
-supported. The curve has no fee of its own; Pipeline's 0.25% applies to every trade.
+supported. Pipeline's 0.25% applies to every trade, on top of the curve's own fee below.
 
 Pricing uses virtual reserves. With `x = virtual_quote + quote_reserve` and
 `y = virtual_token + token_reserve`, a buy of `q` gives `floor(y × q / (x + q))` tokens and
 a sell of `t` gives `floor(x × t / (y + t))` quote, each capped at what the vault holds.
 `virtual_quote` sets the opening price together with the supply; `virtual_token` keeps the
 price finite as the supply sells out.
+
+### The swap fee and the pot
+
+Every trade pays `swap_fee_bps` of its input to the pot. On a buy the fee is spent on the
+curve, as it stands after the buyer's own purchase, and the tokens it buys go to the pot
+vault. On a sell the fee is taken in tokens and moved from the token vault to the pot. The
+pot therefore only ever holds the launched token, and all trading in either direction
+funds the prizes. The buyer's or seller's own trade is priced on the rest of their input.
 
 ### Setup data
 
@@ -40,22 +48,24 @@ price finite as the supply sells out.
 | `bonus_bps: u16` | Win size, in basis points of the buyer's base output |
 | `max_win_pot_bps: u16` | Cap on one win, in basis points of the pot's balance |
 | `reveal_delay_slots: u64` | Slots between a gacha buy and the slot whose block hash decides it |
+| `swap_fee_bps: u16` | Fee on every trade, in basis points of the input, paid into the pot |
 
 Setup accounts after the router's fixed four: quote mint, token mint (writable, signer),
 quote vault `["quote_vault", curve]`, token vault `["token_vault", curve]`, pot vault
 `["pot", curve]`, the quote mint's token program, SPL Token. The market state is the curve
 PDA `["curve", token_mint]`.
 
-Keep expected payout at or below the fee so the pot stays solvent:
-`bonus_bps / win_one_in ≤ gacha_fee_bps`. For example a 2% fee supports a 1-in-20 chance
-of a 40% bonus. `max_win_pot_bps` stops a hot streak from emptying the pot.
+Keep expected payout at or below what gacha buys put in, so the pot stays solvent on
+its own: `bonus_bps / win_one_in ≤ swap_fee_bps + gacha_fee_bps`. For example a 0.5% swap
+fee and a 2% gacha fee support a 1-in-20 chance of a 40% bonus, and plain trades only
+add to that. `max_win_pot_bps` stops a hot streak from emptying the pot.
 
 ## A gacha buy
 
 A buy opts in by setting the first byte of the trade's `extra` to `1`. The strategy then:
 
-1. takes `gacha_fee_bps` of the input as the fee and prices the rest on the curve: that is
-   the buyer's **base** output, and what `pipeline_quote` returns;
+1. takes `swap_fee_bps + gacha_fee_bps` of the input as the fee and prices the rest on
+   the curve: that is the buyer's **base** output, and what `pipeline_quote` returns;
 2. spends the fee on the curve as it stands after the base buy, and sends what it buys to
    the pot vault;
 3. arms the buyer's **ticket** with the current slot and the base amount.
@@ -65,9 +75,9 @@ it with the `open_ticket` custom action (paying its rent) in the same transactio
 swap, before it. A trader with an armed ticket can still buy and sell normally, but cannot
 make another gacha buy until the ticket is resolved.
 
-Account resolution for a gacha buy returns the token vault, the pot vault and the ticket
-(the ticket only when the quote names a trader). Plain buys return the token vault; sells
-return the quote vault. Transfer-hook accounts for the quote mint follow as usual.
+Account resolution returns the output vault and the pot vault for every trade, and for a
+gacha buy also the ticket (only when the quote names a trader). Transfer-hook accounts for
+the quote mint follow as usual.
 
 ## Resolving a ticket
 
@@ -129,7 +139,7 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (2% fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf`](https://orbmarkets.io/address/3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf/history?cluster=devnet) |
+| Demo market (0.5% swap fee to the pot, 2% gacha fee, 1-in-20 for a 40% bonus, 10-slot reveal, 9-decimal test quote) | [`3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf`](https://orbmarkets.io/address/3fjboEpgdFNFqNZeZ6gynah7H6SsM1Cb1eLCc9DMnJaf/history?cluster=devnet) |
 | Demo token | `5ZMhj2g7R1QMY7ZQuZXX2e7HeBg18UCnAZ7363Skr7XC` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the

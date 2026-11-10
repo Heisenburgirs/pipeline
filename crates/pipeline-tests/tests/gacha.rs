@@ -30,6 +30,8 @@ const WIN_ONE_IN: u32 = 20;
 const BONUS_BPS: u16 = 4_000;
 const MAX_WIN_POT_BPS: u16 = 1_000;
 const REVEAL_DELAY: u64 = 10;
+/// 0.5% of every trade goes to the pot.
+const SWAP_FEE_BPS: u16 = 50;
 
 /// Mirrors the strategy's `InitParams`.
 #[derive(borsh::BorshSerialize)]
@@ -42,6 +44,7 @@ struct InitParams {
     bonus_bps: u16,
     max_win_pot_bps: u16,
     reveal_delay_slots: u64,
+    swap_fee_bps: u16,
 }
 
 fn params() -> InitParams {
@@ -54,6 +57,7 @@ fn params() -> InitParams {
         bonus_bps: BONUS_BPS,
         max_win_pot_bps: MAX_WIN_POT_BPS,
         reveal_delay_slots: REVEAL_DELAY,
+        swap_fee_bps: SWAP_FEE_BPS,
     }
 }
 
@@ -165,26 +169,26 @@ fn curve_out(reserve_in: u128, reserve_out: u128, amount_in: u64) -> u64 {
     (reserve_out * amount_in as u128 / (reserve_in + amount_in as u128)) as u64
 }
 
-/// What a buy of `amount` gives the trader, and what its gacha fee buys for the pot.
+/// What a buy of `amount` gives the trader, and what its fees buy for the pot.
 fn price_buy(env: &Env, m: &GachaMarket, amount: u64, gacha: bool) -> (u64, u64) {
     let (quote_reserve, token_reserve) = reserves(env, m);
     let x = VIRTUAL_QUOTE as u128 + quote_reserve as u128;
     let y = VIRTUAL_TOKEN as u128 + token_reserve as u128;
-    if !gacha {
-        return (curve_out(x, y, amount).min(token_reserve), 0);
-    }
-    let fee = fees::ceil_bps(amount, GACHA_FEE_BPS as u64).unwrap();
+    let fee_bps = SWAP_FEE_BPS as u64 + if gacha { GACHA_FEE_BPS as u64 } else { 0 };
+    let fee = fees::ceil_bps(amount, fee_bps).unwrap();
     let base = curve_out(x, y, amount - fee).min(token_reserve);
     let pot =
         curve_out(x + (amount - fee) as u128, y - base as u128, fee).min(token_reserve - base);
     (base, pot)
 }
 
-fn price_sell(env: &Env, m: &GachaMarket, amount: u64) -> u64 {
+/// What a sell of `amount` pays, and the fee in tokens that goes to the pot.
+fn price_sell(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     let (quote_reserve, token_reserve) = reserves(env, m);
     let x = VIRTUAL_QUOTE as u128 + quote_reserve as u128;
     let y = VIRTUAL_TOKEN as u128 + token_reserve as u128;
-    curve_out(y, x, amount).min(quote_reserve)
+    let fee = fees::ceil_bps(amount, SWAP_FEE_BPS as u64).unwrap();
+    (curve_out(y, x, amount - fee).min(quote_reserve), fee)
 }
 
 fn swap_accounts(
@@ -195,12 +199,11 @@ fn swap_accounts(
     trader_quote: &Pubkey,
     trader_token: &Pubkey,
 ) -> client::SwapAccounts {
-    let mut strategy_accounts = vec![AccountMeta::new(
-        if buy { m.token_vault } else { m.quote_vault },
-        false,
-    )];
+    let mut strategy_accounts = vec![
+        AccountMeta::new(if buy { m.token_vault } else { m.quote_vault }, false),
+        AccountMeta::new(m.pot_vault, false),
+    ];
     if gacha {
-        strategy_accounts.push(AccountMeta::new(m.pot_vault, false));
         strategy_accounts.push(AccountMeta::new(ticket_pda(&m.curve, trader), false));
     }
     let (input_mint, output_mint, trader_input, trader_output, input_vault) = if buy {
@@ -444,24 +447,33 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     let t = trader(&mut env, &m, 20_000_000_000);
     let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
 
-    // Buy 1 quote unit (1e9) on the fresh curve.
+    // Buy 1 quote unit (1e9) on the fresh curve: 0.5% of it buys for the pot.
     let amount = 1_000_000_000;
-    let (expected, _) = price_buy(&env, &m, amount, false);
+    let (expected, pot) = price_buy(&env, &m, amount, false);
+    let fee = fees::ceil_bps(amount, SWAP_FEE_BPS as u64).unwrap();
+    assert_eq!(fee, 5_000_000);
     assert_eq!(
         expected,
         curve_out(
             VIRTUAL_QUOTE as u128,
             (VIRTUAL_TOKEN + SUPPLY) as u128,
-            amount
+            amount - fee
         )
     );
+    assert!(pot > 0 && pot < expected / 100);
 
     let mut quoter = quoter_for(&env, &m, &[]);
     let request = quote_request(&m, true, amount, None, vec![]);
     let resolved = quoter
         .resolve_accounts(&view(&env, &m), &request, |_, _| {})
         .unwrap();
-    assert_eq!(resolved, vec![AccountMeta::new(m.token_vault, false)]);
+    assert_eq!(
+        resolved,
+        vec![
+            AccountMeta::new(m.token_vault, false),
+            AccountMeta::new(m.pot_vault, false)
+        ]
+    );
     let quote = quoter.quote(&view(&env, &m), &request, &resolved).unwrap();
     assert_eq!(quote.amount_out, expected);
     assert_eq!(quote.total_spend, amount + fees::pipeline_fee(amount));
@@ -478,20 +490,29 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
         env.token_balance(&trader_quote),
         20_000_000_000 - amount - fees::pipeline_fee(amount)
     );
-    assert_eq!(reserves(&env, &m), (amount, SUPPLY - expected));
+    assert_eq!(reserves(&env, &m), (amount, SUPPLY - expected - pot));
+    assert_eq!(env.token_balance(&m.pot_vault), pot);
     let event = &swap_events(&meta)[0];
     assert_eq!((event.net_sent, event.received), (amount, expected));
 
-    // Sell half back; the quote reserve is what pays, and the quoter agrees.
+    // Sell half back; the quote reserve is what pays, 0.5% of the tokens go to the
+    // pot, and the quoter agrees.
     let sell = expected / 2;
-    let expected_quote = price_sell(&env, &m, sell);
+    let (expected_quote, sell_fee) = price_sell(&env, &m, sell);
     assert!(expected_quote > 0 && expected_quote < amount);
+    assert_eq!(sell_fee, fees::ceil_bps(sell, SWAP_FEE_BPS as u64).unwrap());
     let mut quoter = quoter_for(&env, &m, &[]);
     let request = quote_request(&m, false, sell, None, vec![]);
     let resolved = quoter
         .resolve_accounts(&view(&env, &m), &request, |_, _| {})
         .unwrap();
-    assert_eq!(resolved, vec![AccountMeta::new(m.quote_vault, false)]);
+    assert_eq!(
+        resolved,
+        vec![
+            AccountMeta::new(m.quote_vault, false),
+            AccountMeta::new(m.pot_vault, false)
+        ]
+    );
     let quote = quoter.quote(&view(&env, &m), &request, &resolved).unwrap();
     assert_eq!(quote.amount_out, expected_quote);
 
@@ -508,7 +529,15 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     );
     assert_eq!(
         reserves(&env, &m),
-        (amount - expected_quote, SUPPLY - expected + sell)
+        (
+            amount - expected_quote,
+            SUPPLY - expected - pot + sell - sell_fee
+        )
+    );
+    assert_eq!(env.token_balance(&m.pot_vault), pot + sell_fee);
+    assert_eq!(
+        env.token_balance(&m.token_vault),
+        SUPPLY - expected - pot + sell - sell_fee
     );
 
     // Exact-out is refused by the router because the market does not support it.
@@ -538,9 +567,12 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     let (base, pot) = price_buy(&env, &m, amount, true);
     assert_eq!(fee, 40_000_000);
     assert!(pot > 0 && pot < base);
-    // The gacha buyer gets less than a plain buyer of the same amount: the fee's share.
-    let (plain, _) = price_buy(&env, &m, amount, false);
-    assert!(base < plain && base + pot <= plain);
+    // The gacha buyer gets less than a plain buyer of the same amount, the gacha fee's
+    // share; what leaves the curve in total is the same either way (up to rounding),
+    // since the pot buys with the fee.
+    let (plain, plain_pot) = price_buy(&env, &m, amount, false);
+    assert!(base < plain);
+    assert!((base + pot).abs_diff(plain + plain_pot) <= 2);
 
     // The quoter resolves the pot and the trader's ticket, and quotes the base amount.
     let mut quoter = quoter_for(&env, &m, &[]);

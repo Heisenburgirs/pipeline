@@ -4,12 +4,16 @@
 //! (the pump.fun shape) against a quote token such as wrapped SOL. The strategy mints
 //! the whole supply into its own vault at market creation and then gives up the mint
 //! authority, so the supply is fixed. Buys move quote into the curve and tokens out;
-//! sells do the reverse. Every trade reprices the curve; there is no separate pool fee.
+//! sells do the reverse. Every trade reprices the curve.
+//!
+//! Every trade also pays `swap_fee_bps` of its input into the **pot**: on a buy the fee is
+//! spent on the curve and the tokens it buys go to the pot, on a sell the fee is taken in
+//! tokens and moved to the pot directly. The pot is what gacha wins are paid from, so
+//! all trading funds the prizes.
 //!
 //! The gacha is opt-in per buy. A buyer who sets the first byte of the trade's `extra`
-//! to 1 pays `gacha_fee_bps` of their input on top of the curve price. The fee is spent
-//! on the curve like any other buy, and the tokens it buys go into a **pot** vault owned
-//! by the curve. The buyer's ticket is armed with the slot of the buy. After
+//! to 1 pays `gacha_fee_bps` of their input on top of the swap fee. It is spent into
+//! the pot the same way. The buyer's ticket is armed with the slot of the buy. After
 //! `reveal_delay_slots`, anyone may resolve the ticket: the hash of the first block at
 //! or after the reveal slot decides a 1-in-`win_one_in` roll, and a win pays
 //! `bonus_bps` of the buyer's base output from the pot, capped at `max_win_pot_bps` of
@@ -101,6 +105,7 @@ pub mod gacha_curve {
         curve.bonus_bps = params.bonus_bps;
         curve.max_win_pot_bps = params.max_win_pot_bps;
         curve.reveal_delay_slots = params.reveal_delay_slots;
+        curve.swap_fee_bps = params.swap_fee_bps;
         curve.market_signer = expected_signer;
         curve.bump = ctx.bumps.curve;
         Ok(())
@@ -117,23 +122,25 @@ pub mod gacha_curve {
         Ok(())
     }
 
-    /// Strategy accounts for a trade: the output vault, and for a gacha buy also the
-    /// pot vault and the trader's ticket.
+    /// Strategy accounts for a trade: the output vault and the pot vault, and for a
+    /// gacha buy also the trader's ticket.
     pub fn pipeline_resolve_accounts(
         ctx: Context<ReadTrade>,
         request: psi::ResolveRequest,
     ) -> Result<()> {
         let curve = &ctx.accounts.curve;
         let kind = TradeKind::of(&request.trade)?;
-        let mut accounts = vec![psi::AccountRef {
-            address: kind.output_vault(curve).to_bytes(),
-            writable: true,
-        }];
-        if kind == TradeKind::GachaBuy {
-            accounts.push(psi::AccountRef {
+        let mut accounts = vec![
+            psi::AccountRef {
+                address: kind.output_vault(curve).to_bytes(),
+                writable: true,
+            },
+            psi::AccountRef {
                 address: curve.pot_vault.to_bytes(),
                 writable: true,
-            });
+            },
+        ];
+        if kind == TradeKind::GachaBuy {
             if let Some(trader) = request.trade.trader {
                 let trader = Pubkey::new_from_array(trader);
                 accounts.push(psi::AccountRef {
@@ -156,8 +163,8 @@ pub mod gacha_curve {
         Ok(())
     }
 
-    /// Remaining accounts: the output vault, then for a gacha buy the pot vault and the
-    /// trader's open ticket, then any transfer-hook accounts of the quote mint.
+    /// Remaining accounts: the output vault, the pot vault, for a gacha buy the trader's
+    /// open ticket, then any transfer-hook accounts of the quote mint.
     pub fn pipeline_swap<'info>(
         ctx: Context<'info, SwapAccounts<'info>>,
         request: psi::SwapRequest,
@@ -215,26 +222,42 @@ pub mod gacha_curve {
             )?;
         }
 
+        let pot_vault_info = &ctx.remaining_accounts[1];
+        require_keys_eq!(
+            pot_vault_info.key(),
+            curve.pot_vault,
+            GachaError::WrongAccount
+        );
+        // On a buy the fee bought tokens from the token vault; on a sell the fee is part
+        // of the tokens the trader sent to the token vault. Either way: vault to pot.
+        if priced.pot_out > 0 {
+            transfer_checked(
+                &ctx.accounts.output_token_program.to_account_info(),
+                output_vault_info,
+                &ctx.accounts.output_mint.to_account_info(),
+                pot_vault_info,
+                &curve_info,
+                &[],
+                priced.pot_out,
+                TOKEN_DECIMALS,
+                &[curve_seeds],
+            )?;
+        }
+        if priced.pot_in > 0 {
+            transfer_checked(
+                &ctx.accounts.input_token_program.to_account_info(),
+                &ctx.accounts.input_vault.to_account_info(),
+                &ctx.accounts.input_mint.to_account_info(),
+                pot_vault_info,
+                &curve_info,
+                &[],
+                priced.pot_in,
+                TOKEN_DECIMALS,
+                &[curve_seeds],
+            )?;
+        }
+
         if kind == TradeKind::GachaBuy {
-            let pot_vault_info = &ctx.remaining_accounts[1];
-            require_keys_eq!(
-                pot_vault_info.key(),
-                curve.pot_vault,
-                GachaError::WrongAccount
-            );
-            if priced.pot_out > 0 {
-                transfer_checked(
-                    &ctx.accounts.output_token_program.to_account_info(),
-                    output_vault_info,
-                    &ctx.accounts.output_mint.to_account_info(),
-                    pot_vault_info,
-                    &curve_info,
-                    &[],
-                    priced.pot_out,
-                    TOKEN_DECIMALS,
-                    &[curve_seeds],
-                )?;
-            }
             arm_ticket(
                 &ctx.remaining_accounts[2],
                 &ctx.accounts.curve.key(),
@@ -257,7 +280,7 @@ pub mod gacha_curve {
             TradeKind::Sell => {
                 curve.token_reserve = curve
                     .token_reserve
-                    .checked_add(priced.quote.amount_in)
+                    .checked_add(priced.quote.amount_in - priced.pot_in)
                     .ok_or(GachaError::Overflow)?;
                 curve.quote_reserve -= priced.quote.amount_out;
             }
@@ -373,13 +396,18 @@ pub struct InitParams {
     pub max_win_pot_bps: u16,
     /// Slots between a gacha buy and the slot whose block hash decides it.
     pub reveal_delay_slots: u64,
+    /// Fee on every trade, in basis points of the input, paid into the pot.
+    pub swap_fee_bps: u16,
 }
 
 impl InitParams {
     fn validate(&self) -> Result<()> {
         require!(self.supply > 0, GachaError::BadInitData);
         require!(self.virtual_quote > 0, GachaError::BadInitData);
-        require!((self.gacha_fee_bps as u128) < BPS, GachaError::BadInitData);
+        require!(
+            (self.swap_fee_bps as u128 + self.gacha_fee_bps as u128) < BPS,
+            GachaError::BadInitData
+        );
         require!(self.win_one_in >= 1, GachaError::BadInitData);
         require!(self.bonus_bps > 0, GachaError::BadInitData);
         require!(
@@ -410,6 +438,8 @@ pub struct Curve {
     pub bonus_bps: u16,
     pub max_win_pot_bps: u16,
     pub reveal_delay_slots: u64,
+    /// Fee on every trade, paid into the pot.
+    pub swap_fee_bps: u16,
     /// The Pipeline market PDA allowed to call `pipeline_swap`.
     pub market_signer: Pubkey,
     pub bump: u8,
@@ -499,15 +529,18 @@ impl TradeKind {
     fn own_account_count(self) -> usize {
         match self {
             TradeKind::GachaBuy => 3,
-            TradeKind::Buy | TradeKind::Sell => 1,
+            TradeKind::Buy | TradeKind::Sell => 2,
         }
     }
 }
 
-/// A priced trade: what the router sees, plus what the gacha fee bought for the pot.
+/// A priced trade: what the router sees, plus what the pot receives: tokens the fees
+/// bought from the token vault on a buy (`pot_out`), or the fee in tokens on a sell
+/// (`pot_in`).
 struct Priced {
     quote: psi::QuoteResult,
     pot_out: u64,
+    pot_in: u64,
 }
 
 impl Curve {
@@ -521,24 +554,17 @@ impl Curve {
         let x = self.virtual_quote as u128 + self.quote_reserve as u128;
         let y = self.virtual_token as u128 + self.token_reserve as u128;
         match kind {
-            TradeKind::Buy => {
+            TradeKind::Buy | TradeKind::GachaBuy => {
                 require!(self.token_reserve > 0, GachaError::InsufficientLiquidity);
-                let out = out_given_in(x, y, trade.amount).min(self.token_reserve as u128) as u64;
-                Ok(Priced {
-                    quote: psi::QuoteResult {
-                        amount_in: trade.amount,
-                        amount_out: out,
-                    },
-                    pot_out: 0,
-                })
-            }
-            TradeKind::GachaBuy => {
-                require!(self.token_reserve > 0, GachaError::InsufficientLiquidity);
-                let fee = fees::ceil_bps(trade.amount, self.gacha_fee_bps as u64)
-                    .ok_or(GachaError::Overflow)?;
+                // The swap fee, plus the gacha fee on an opt-in buy, come off the input
+                // and buy for the pot from the curve as it stands after the base buy.
+                let mut fee_bps = self.swap_fee_bps as u64;
+                if kind == TradeKind::GachaBuy {
+                    fee_bps += self.gacha_fee_bps as u64;
+                }
+                let fee = fees::ceil_bps(trade.amount, fee_bps).ok_or(GachaError::Overflow)?;
                 let base = trade.amount - fee;
                 let out = out_given_in(x, y, base).min(self.token_reserve as u128) as u64;
-                // The fee buys from the curve as it stands after the base buy.
                 let x_after = x + base as u128;
                 let y_after = y - out as u128;
                 let left = (self.token_reserve - out) as u128;
@@ -549,17 +575,23 @@ impl Curve {
                         amount_out: out,
                     },
                     pot_out,
+                    pot_in: 0,
                 })
             }
             TradeKind::Sell => {
                 require!(self.quote_reserve > 0, GachaError::InsufficientLiquidity);
-                let out = out_given_in(y, x, trade.amount).min(self.quote_reserve as u128) as u64;
+                // The swap fee is taken in tokens and goes to the pot; the rest sells.
+                let fee = fees::ceil_bps(trade.amount, self.swap_fee_bps as u64)
+                    .ok_or(GachaError::Overflow)?;
+                let net = trade.amount - fee;
+                let out = out_given_in(y, x, net).min(self.quote_reserve as u128) as u64;
                 Ok(Priced {
                     quote: psi::QuoteResult {
                         amount_in: trade.amount,
                         amount_out: out,
                     },
                     pot_out: 0,
+                    pot_in: fee,
                 })
             }
         }
