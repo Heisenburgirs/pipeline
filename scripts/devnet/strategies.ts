@@ -69,19 +69,21 @@ const LAUNCH = {
     // upgrade authority.
     creatorFeeBps: 30,
 };
-// Gacha curve: a 1B supply against a 9-decimal quote, 2% fee, 1-in-20 for a 40% bonus
-// capped at 10% of the pot, decided 10 slots after the buy. See docs/GACHA-CURVE.md.
+// Gacha curve: a 1B supply against a 9-decimal quote, 1-in-100 for a 20% bonus capped
+// at 10% of the pot, decided 10 slots after the buy. Every trade pays 0.5%: 0.3% to the
+// pot, 0.05% left in the curve, 0.05% to the creator and 0.1% to the program authority.
+// See docs/GACHA-CURVE.md.
 const GACHA = {
     supply: 1_000_000_000n * USD,
     virtualQuote: 30_000_000_000n,
     virtualToken: 280_000_000n * USD,
-    gachaFeeBps: 200,
-    winOneIn: 20,
-    bonusBps: 4_000,
+    winOneIn: 100,
+    bonusBps: 2_000,
     maxWinPotBps: 1_000,
     revealDelaySlots: 10n,
-    // 0.5% of every trade, in either direction, goes to the pot.
-    swapFeeBps: 50,
+    potFeeBps: 30,
+    curveFeeBps: 5,
+    creatorFeeBps: 5,
 };
 
 const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
@@ -386,12 +388,14 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u64(GACHA.supply),
         u64(GACHA.virtualQuote),
         u64(GACHA.virtualToken),
-        u16(GACHA.gachaFeeBps),
         u32(GACHA.winOneIn),
         u16(GACHA.bonusBps),
         u16(GACHA.maxWinPotBps),
         u64(GACHA.revealDelaySlots),
-        u16(GACHA.swapFeeBps),
+        u16(GACHA.potFeeBps),
+        u16(GACHA.curveFeeBps),
+        u16(GACHA.creatorFeeBps),
+        encoder.encode(wallet.address),
     );
     await send(
         wallet,
@@ -470,7 +474,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
     const resolveSignature = await send(wallet, [resolve]);
     const payout = (await tokenBalance(traderToken)) - before;
     const closed = (await accountData(ticket)) === null;
-    log(`ticket resolved: ${payout > 0n ? `WON ${(Number(payout) / 1e6).toFixed(2)} tokens from the pot` : 'lost (1-in-20 odds)'}, ticket closed: ${closed}, ${resolveSignature}`);
+    log(`ticket resolved: ${payout > 0n ? `WON ${(Number(payout) / 1e6).toFixed(2)} tokens from the pot` : 'lost (1-in-100 odds)'}, ticket closed: ${closed}, ${resolveSignature}`);
     if (!closed) throw new Error('ticket should be closed after resolution');
     return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature, resolve: resolveSignature, payout };
 }
