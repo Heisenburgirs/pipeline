@@ -1,5 +1,6 @@
 //! The gacha bonding-curve strategy through the router: curve pricing, the four-way
-//! fee split, tickets, their resolution against a later block hash, and fee claims.
+//! fee split, tickets, their resolution against ORAO VRF randomness (simulated here by
+//! writing fulfilled randomness accounts), and fee claims.
 
 mod common;
 
@@ -8,15 +9,15 @@ use pipeline_client::{self as client, pda, AccountMeta, Instruction, Pubkey};
 use pipeline_quoter::{MarketView, QuoteRequest, Quoter};
 use pipeline_strategy_interface::{fees, TradeMode};
 use sha2::{Digest, Sha256};
-use solana_hash::Hash;
+use solana_account::Account;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
-use solana_slot_hashes::SlotHashes;
 
 const TOKEN: Pubkey = client::TOKEN_PROGRAM_ID;
 const GACHA_PROGRAM_ID: Pubkey = client::pubkey!("2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G");
-const SLOT_HASHES_ID: Pubkey = client::pubkey!("SysvarS1otHashes111111111111111111111111111");
-const RESOLVE_WINDOW_SLOTS: u64 = 400;
+const ORAO_VRF: Pubkey = client::pubkey!("VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y");
+/// sha256("account:RandomnessV2")[..8].
+const RANDOMNESS_V2_DISCRIMINATOR: [u8; 8] = [139, 239, 184, 215, 227, 86, 191, 226];
 
 /// One billion tokens with 6 decimals.
 const SUPPLY: u64 = 1_000_000_000_000_000;
@@ -29,7 +30,8 @@ const VIRTUAL_TOKEN: u64 = 280_000_000_000_000;
 const WIN_ONE_IN: u32 = 100;
 const BONUS_BPS: u16 = 2_000;
 const MAX_WIN_POT_BPS: u16 = 1_000;
-const REVEAL_DELAY: u64 = 10;
+/// A ticket must be resolved within this many slots of its buy.
+const RESOLVE_WINDOW: u64 = 400;
 /// Every trade pays 0.5%: 0.3% to the pot, 0.05% left in the curve, 0.05% to the
 /// market's creator and 0.1% to the program's upgrade authority (compiled in).
 const POT_FEE_BPS: u16 = 30;
@@ -51,7 +53,7 @@ struct InitParams {
     win_one_in: u32,
     bonus_bps: u16,
     max_win_pot_bps: u16,
-    reveal_delay_slots: u64,
+    resolve_window_slots: u64,
     pot_fee_bps: u16,
     curve_fee_bps: u16,
     creator_fee_bps: u16,
@@ -69,7 +71,7 @@ fn params(creator: &Pubkey) -> InitParams {
         win_one_in: WIN_ONE_IN,
         bonus_bps: BONUS_BPS,
         max_win_pot_bps: MAX_WIN_POT_BPS,
-        reveal_delay_slots: REVEAL_DELAY,
+        resolve_window_slots: RESOLVE_WINDOW,
         pot_fee_bps: POT_FEE_BPS,
         curve_fee_bps: CURVE_FEE_BPS,
         creator_fee_bps: CREATOR_FEE_BPS,
@@ -259,11 +261,13 @@ fn price_sell(env: &Env, m: &GachaMarket, amount: u64) -> (u64, u64) {
     )
 }
 
+/// Swap accounts; `gacha` is the randomness account of the ticket's next round for a
+/// gacha buy (see `next_randomness`), `None` for a plain trade.
 fn swap_accounts(
     m: &GachaMarket,
     trader: &Pubkey,
     buy: bool,
-    gacha: bool,
+    gacha: Option<Pubkey>,
     trader_quote: &Pubkey,
     trader_token: &Pubkey,
 ) -> client::SwapAccounts {
@@ -271,8 +275,9 @@ fn swap_accounts(
         AccountMeta::new(if buy { m.token_vault } else { m.quote_vault }, false),
         AccountMeta::new(m.pot_vault, false),
     ];
-    if gacha {
+    if let Some(randomness) = gacha {
         strategy_accounts.push(AccountMeta::new(ticket_pda(&m.curve, trader), false));
+        strategy_accounts.push(AccountMeta::new_readonly(randomness, false));
     }
     let (input_mint, output_mint, trader_input, trader_output, input_vault) = if buy {
         (
@@ -321,7 +326,7 @@ fn open_ticket_ix(m: &GachaMarket, trader: &Pubkey) -> Instruction {
         &client::instruction_discriminator("open_ticket"),
         vec![
             AccountMeta::new(*trader, true),
-            AccountMeta::new_readonly(m.curve, false),
+            AccountMeta::new(m.curve, false),
             AccountMeta::new(ticket_pda(&m.curve, trader), false),
             AccountMeta::new_readonly(client::SYSTEM_PROGRAM_ID, false),
         ],
@@ -371,19 +376,119 @@ fn claim_fees_ix(env: &mut Env, m: &GachaMarket, claimant: &Pubkey) -> Instructi
     )
 }
 
-fn resolve_ticket_ix(m: &GachaMarket, trader: &Pubkey, trader_token: &Pubkey) -> Instruction {
+/// The strategy's seed for the `round`-th gacha buy of a ticket opened with `nonce`,
+/// mirrored.
+fn ticket_seed(ticket: &Pubkey, nonce: u64, round: u32) -> [u8; 32] {
+    Sha256::new()
+        .chain_update(b"gacha-vrf")
+        .chain_update(ticket.as_ref())
+        .chain_update(nonce.to_le_bytes())
+        .chain_update(round.to_le_bytes())
+        .finalize()
+        .into()
+}
+
+/// How many tickets the curve has opened: the next one gets this plus one as nonce.
+fn curve_ticket_nonce(env: &Env, m: &GachaMarket) -> u64 {
+    let data = env.account_data(&m.curve);
+    u64::from_le_bytes(data[296..304].try_into().unwrap())
+}
+
+/// ORAO's randomness request account for a seed.
+fn randomness_pda(seed: &[u8; 32]) -> Pubkey {
+    Pubkey::find_program_address(&[b"orao-vrf-randomness-request", seed], &ORAO_VRF).0
+}
+
+/// `(rounds, seed, nonce)` of a ticket.
+fn ticket_round(env: &Env, address: &Pubkey) -> (u32, [u8; 32], u64) {
+    let data = env.account_data(address);
+    (
+        u32::from_le_bytes(data[89..93].try_into().unwrap()),
+        data[93..125].try_into().unwrap(),
+        u64::from_le_bytes(data[125..133].try_into().unwrap()),
+    )
+}
+
+/// The seed a gacha buy by `trader` will arm: the ticket's next round, or round 1 of a
+/// ticket about to be opened with the curve's next nonce.
+fn next_seed(env: &Env, m: &GachaMarket, trader: &Pubkey) -> [u8; 32] {
+    let ticket_key = ticket_pda(&m.curve, trader);
+    let (nonce, rounds) = if env.svm.get_account(&ticket_key).is_some() {
+        let (rounds, _, nonce) = ticket_round(env, &ticket_key);
+        (nonce, rounds)
+    } else {
+        (curve_ticket_nonce(env, m) + 1, 0)
+    };
+    ticket_seed(&ticket_key, nonce, rounds + 1)
+}
+
+/// The randomness account a gacha buy by `trader` must pass (see `next_seed`).
+fn next_randomness(env: &Env, m: &GachaMarket, trader: &Pubkey) -> Pubkey {
+    randomness_pda(&next_seed(env, m, trader))
+}
+
+/// Writes an ORAO `RandomnessV2` account for `seed`, pending or fulfilled with
+/// `randomness`, as the oracles would.
+fn write_randomness(env: &mut Env, seed: &[u8; 32], randomness: Option<&[u8; 64]>) {
+    let mut data = RANDOMNESS_V2_DISCRIMINATOR.to_vec();
+    match randomness {
+        None => {
+            data.push(0);
+            data.extend_from_slice(&[0u8; 32]);
+            data.extend_from_slice(seed);
+            data.extend_from_slice(&0u32.to_le_bytes());
+        }
+        Some(randomness) => {
+            data.push(1);
+            data.extend_from_slice(&[0u8; 32]);
+            data.extend_from_slice(seed);
+            data.extend_from_slice(randomness);
+        }
+    }
+    env.svm
+        .set_account(
+            randomness_pda(seed),
+            Account {
+                lamports: 10_000_000,
+                data,
+                owner: ORAO_VRF,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+}
+
+/// Fulfils the ticket's current seed with randomness of the wanted tier.
+fn fulfil(env: &mut Env, ticket_key: &Pubkey, want: u8) {
+    let (_, seed, _) = ticket_round(env, ticket_key);
+    write_randomness(env, &seed, Some(&randomness_that(want)));
+}
+
+fn resolve_ticket_ix(
+    env: &Env,
+    m: &GachaMarket,
+    trader: &Pubkey,
+    trader_token: &Pubkey,
+) -> Instruction {
+    let ticket_key = ticket_pda(&m.curve, trader);
+    let randomness = if env.svm.get_account(&ticket_key).is_some() {
+        randomness_pda(&ticket_round(env, &ticket_key).1)
+    } else {
+        Pubkey::new_unique()
+    };
     Instruction::new_with_bytes(
         GACHA_PROGRAM_ID,
         &client::instruction_discriminator("resolve_ticket"),
         vec![
-            AccountMeta::new(ticket_pda(&m.curve, trader), false),
+            AccountMeta::new(ticket_key, false),
             AccountMeta::new_readonly(m.curve, false),
             AccountMeta::new(*trader, false),
             AccountMeta::new(m.pot_vault, false),
             AccountMeta::new(*trader_token, false),
             AccountMeta::new_readonly(m.token_mint, false),
             AccountMeta::new_readonly(TOKEN, false),
-            AccountMeta::new_readonly(SLOT_HASHES_ID, false),
+            AccountMeta::new_readonly(randomness, false),
         ],
     )
 }
@@ -404,7 +509,8 @@ fn gacha_buy(
     amount: u64,
 ) -> (u64, u64) {
     let (base, pot) = price_buy(env, m, amount);
-    let accounts = swap_accounts(m, &t.0.pubkey(), true, true, &t.1, &t.2);
+    let randomness = next_randomness(env, m, &t.0.pubkey());
+    let accounts = swap_accounts(m, &t.0.pubkey(), true, Some(randomness), &t.1, &t.2);
     env.send(
         &[
             open_ticket_ix(m, &t.0.pubkey()),
@@ -424,16 +530,11 @@ const LOSE: u8 = 0;
 const WIN: u8 = 1;
 const JACKPOT: u8 = 2;
 
-/// The strategy's roll, mirrored: sha256(block hash ‖ ticket ‖ buy slot) as a little-
+/// The strategy's roll, mirrored: the first 8 bytes of the randomness as a little-
 /// endian u64; a multiple of `JACKPOT_ONE_IN` is a jackpot, else a multiple of
 /// `WIN_ONE_IN` is a win.
-fn tier(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64) -> u8 {
-    let digest = Sha256::new()
-        .chain_update(hash)
-        .chain_update(ticket.as_ref())
-        .chain_update(buy_slot.to_le_bytes())
-        .finalize();
-    let value = u64::from_le_bytes(digest[..8].try_into().unwrap());
+fn tier(randomness: &[u8; 64]) -> u8 {
+    let value = u64::from_le_bytes(randomness[..8].try_into().unwrap());
     if value % JACKPOT_ONE_IN as u64 == 0 {
         JACKPOT
     } else if value % WIN_ONE_IN as u64 == 0 {
@@ -443,26 +544,16 @@ fn tier(hash: &[u8; 32], ticket: &Pubkey, buy_slot: u64) -> u8 {
     }
 }
 
-/// A block hash that gives `ticket` the wanted tier.
-fn hash_that(ticket: &Pubkey, buy_slot: u64, want: u8) -> [u8; 32] {
+/// Randomness of the wanted tier.
+fn randomness_that(want: u8) -> [u8; 64] {
     (0u64..)
         .map(|nonce| {
-            let mut hash = [0u8; 32];
-            hash[..8].copy_from_slice(&nonce.to_le_bytes());
-            hash
+            let mut randomness = [7u8; 64];
+            randomness[..8].copy_from_slice(&nonce.to_le_bytes());
+            randomness
         })
-        .find(|hash| tier(hash, ticket, buy_slot) == want)
+        .find(|randomness| tier(randomness) == want)
         .unwrap()
-}
-
-/// Installs a SlotHashes sysvar holding exactly `entries` (newest first).
-fn set_slot_hashes(env: &mut Env, entries: &[(u64, [u8; 32])]) {
-    let mut sorted: Vec<(u64, Hash)> = entries
-        .iter()
-        .map(|(slot, hash)| (*slot, Hash::new_from_array(*hash)))
-        .collect();
-    sorted.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    env.svm.set_sysvar(&SlotHashes::new(&sorted));
 }
 
 // ------------------------------------------------------------------- the quoter
@@ -594,7 +685,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     assert_eq!(quote.amount_out, expected);
     assert_eq!(quote.total_spend, amount + fees::pipeline_fee(amount));
 
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     let meta = env
         .send(
             &[client::swap(&accounts, &exact_in(amount, expected))],
@@ -637,7 +728,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     let quote = quoter.quote(&view(&env, &m), &request, &resolved).unwrap();
     assert_eq!(quote.amount_out, expected_quote);
 
-    let accounts = swap_accounts(&m, &trader_key, false, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, false, None, &trader_quote, &trader_token);
     env.send(
         &[client::swap(&accounts, &exact_in(sell, expected_quote))],
         &[&t.0],
@@ -667,7 +758,7 @@ fn plain_buys_and_sells_follow_the_curve_and_match_quotes() {
     );
 
     // Exact-out is refused by the router because the market does not support it.
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     let args = client::SwapArgs {
         mode: TradeMode::ExactOut,
         amount_in: amount,
@@ -703,12 +794,14 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     let resolved = quoter
         .resolve_accounts(&view(&env, &m), &request, |_, _| {})
         .unwrap();
+    // Two rounds: the ticket first, then the randomness account its data names.
     assert_eq!(
         resolved,
         vec![
             AccountMeta::new(m.token_vault, false),
             AccountMeta::new(m.pot_vault, false),
             AccountMeta::new(ticket_key, false),
+            AccountMeta::new_readonly(next_randomness(&env, &m, &trader_key), false),
         ]
     );
     let quote = quoter.quote(&view(&env, &m), &request, &resolved).unwrap();
@@ -728,7 +821,14 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     );
 
     // Without an open ticket the swap fails.
-    let accounts = swap_accounts(&m, &trader_key, true, true, &trader_quote, &trader_token);
+    let accounts = swap_accounts(
+        &m,
+        &trader_key,
+        true,
+        Some(next_randomness(&env, &m, &trader_key)),
+        &trader_quote,
+        &trader_token,
+    );
     assert_fails_with(
         env.send(
             &[client::swap(&accounts, &gacha_args(amount, base))],
@@ -754,13 +854,20 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     assert_eq!(ticket(&env, &ticket_key), Some((true, slot, base)));
 
     // A second gacha buy must wait for the ticket; plain buys still work.
-    let accounts = swap_accounts(&m, &trader_key, true, true, &trader_quote, &trader_token);
+    let accounts = swap_accounts(
+        &m,
+        &trader_key,
+        true,
+        Some(next_randomness(&env, &m, &trader_key)),
+        &trader_quote,
+        &trader_token,
+    );
     assert_fails_with(
         env.send(&[client::swap(&accounts, &gacha_args(amount, 0))], &[&t.0]),
         "TicketPending",
     );
     let (plain, _) = price_buy(&env, &m, amount);
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     env.send(
         &[client::swap(&accounts, &exact_in(amount, plain))],
         &[&t.0],
@@ -774,7 +881,7 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
     );
 
     // The gacha flag means nothing on a sell, and unknown flags are rejected.
-    let accounts = swap_accounts(&m, &trader_key, false, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, false, None, &trader_quote, &trader_token);
     assert_fails_with(
         env.send(
             &[client::swap(&accounts, &gacha_args(1_000_000, 0))],
@@ -782,7 +889,7 @@ fn a_gacha_buy_pays_the_curve_price_on_its_base_and_funds_the_pot() {
         ),
         "BadExtra",
     );
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     let odd = client::SwapArgs {
         extra: vec![7],
         ..exact_in(1_000_000, 0)
@@ -821,7 +928,7 @@ fn an_unarmed_ticket_can_be_closed_for_its_rent() {
 }
 
 #[test]
-fn tickets_resolve_against_the_first_block_hash_at_or_after_the_reveal_slot() {
+fn tickets_resolve_against_fulfilled_vrf_randomness() {
     let mut env = Env::new();
     let m = setup(&mut env);
 
@@ -835,38 +942,48 @@ fn tickets_resolve_against_the_first_block_hash_at_or_after_the_reveal_slot() {
     let ticket_key = ticket_pda(&m.curve, &trader_key);
     let buy_slot = current_slot(&env);
     let (stake, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    let reveal = buy_slot + REVEAL_DELAY;
     let pot_before = env.token_balance(&m.pot_vault);
     let rent = env.lamports(&ticket_key);
     let trader_lamports = env.lamports(&trader_key);
 
-    // Before the reveal slot has a block, resolution is too early.
-    set_slot_hashes(&mut env, &[(buy_slot, [9u8; 32])]);
-    assert_fails_with(
-        env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[]),
-        "TooEarly",
-    );
-    env.svm.warp_to_slot(reveal + 3);
-    assert_fails_with(
-        env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[]),
-        "TooEarly",
-    );
+    // The ticket's first round names its seed; the randomness account is ORAO's PDA.
+    let (round, seed, nonce) = ticket_round(&env, &ticket_key);
+    assert_eq!((round, seed), (1, ticket_seed(&ticket_key, nonce, 1)));
+    assert_eq!(nonce, curve_ticket_nonce(&env, &m));
 
-    // The reveal slot was skipped; the next block's hash decides. Make it a win, and
-    // make the exact reveal slot's would-be hash a loss to prove which one was used.
-    let winning = hash_that(&ticket_key, buy_slot, WIN);
-    let losing = hash_that(&ticket_key, buy_slot, LOSE);
-    set_slot_hashes(
-        &mut env,
-        &[
-            (reveal + 2, winning),
-            (reveal - 1, losing),
-            (buy_slot, [9u8; 32]),
-        ],
+    // Until the VRF has fulfilled the seed, resolution waits: not requested at all,
+    // then requested but pending.
+    assert_fails_with(
+        env.send(
+            &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+            &[],
+        ),
+        "NotFulfilled",
     );
-    // Resolved by someone other than the trader (the test payer), as a keeper would.
-    env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
-        .expect("resolve");
+    write_randomness(&mut env, &seed, None);
+    assert_fails_with(
+        env.send(
+            &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+            &[],
+        ),
+        "NotFulfilled",
+    );
+    // Randomness fulfilled under a different seed is refused.
+    let wrong_seed = ticket_seed(&ticket_key, nonce, 2);
+    write_randomness(&mut env, &wrong_seed, Some(&randomness_that(WIN)));
+    let mut wrong = resolve_ticket_ix(&env, &m, &trader_key, &trader_token);
+    wrong.accounts[7] = AccountMeta::new_readonly(randomness_pda(&wrong_seed), false);
+    assert_fails_with(env.send(&[wrong], &[]), "WrongAccount");
+
+    // The oracles fulfil the seed with a winning value. Resolved by someone other than
+    // the trader (the test payer), as a keeper would.
+    env.svm.warp_to_slot(buy_slot + 3);
+    fulfil(&mut env, &ticket_key, WIN);
+    env.send(
+        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[],
+    )
+    .expect("resolve");
 
     let bonus = stake as u128 * BONUS_BPS as u128 / 10_000;
     let cap = pot_before as u128 * MAX_WIN_POT_BPS as u128 / 10_000;
@@ -878,9 +995,62 @@ fn tickets_resolve_against_the_first_block_hash_at_or_after_the_reveal_slot() {
     assert_eq!(ticket(&env, &ticket_key), None);
     assert_eq!(env.lamports(&trader_key), trader_lamports + rent);
 
-    // The trader can play again.
+    // The trader can play again: the reopened ticket gets a new nonce, so its first
+    // round's seed is fresh even though round 1 of the old one was fulfilled.
     let (stake2, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    assert_eq!(ticket(&env, &ticket_key), Some((true, reveal + 3, stake2)));
+    assert_eq!(
+        ticket(&env, &ticket_key),
+        Some((true, buy_slot + 3, stake2))
+    );
+    assert_eq!(
+        ticket_round(&env, &ticket_key),
+        (1, ticket_seed(&ticket_key, nonce + 1, 1), nonce + 1)
+    );
+}
+
+#[test]
+fn a_buy_refuses_a_seed_whose_randomness_was_already_requested() {
+    let mut env = Env::new();
+    let m = setup(&mut env);
+    let t = trader(&mut env, &m, 10_000_000_000);
+    let (trader_key, trader_quote, trader_token) = (t.0.pubkey(), t.1, t.2);
+
+    // Someone requested (and even got) randomness for the ticket's next seed before
+    // the buy: the buy must not arm against it, or the outcome could be known upfront.
+    let seed = next_seed(&env, &m, &trader_key);
+    write_randomness(&mut env, &seed, Some(&randomness_that(JACKPOT)));
+    let amount = 1_000_000_000;
+    let (base, _) = price_buy(&env, &m, amount);
+    let accounts = swap_accounts(
+        &m,
+        &trader_key,
+        true,
+        Some(randomness_pda(&seed)),
+        &trader_quote,
+        &trader_token,
+    );
+    assert_fails_with(
+        env.send(
+            &[
+                open_ticket_ix(&m, &trader_key),
+                client::swap(&accounts, &gacha_args(amount, base)),
+            ],
+            &[&t.0],
+        ),
+        "SeedAlreadyRequested",
+    );
+    // A pending request blocks it just the same.
+    write_randomness(&mut env, &seed, None);
+    assert_fails_with(
+        env.send(
+            &[
+                open_ticket_ix(&m, &trader_key),
+                client::swap(&accounts, &gacha_args(amount, base)),
+            ],
+            &[&t.0],
+        ),
+        "SeedAlreadyRequested",
+    );
 }
 
 #[test]
@@ -896,18 +1066,15 @@ fn a_jackpot_pays_a_multiple_of_the_stake_capped_at_its_share_of_the_pot() {
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
     let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let buy_slot = current_slot(&env);
     let (stake, _) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    let reveal = buy_slot + REVEAL_DELAY;
     let pot_before = env.token_balance(&m.pot_vault);
 
-    env.svm.warp_to_slot(reveal + 1);
-    set_slot_hashes(
-        &mut env,
-        &[(reveal, hash_that(&ticket_key, buy_slot, JACKPOT))],
-    );
-    env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
-        .expect("resolve a jackpot");
+    fulfil(&mut env, &ticket_key, JACKPOT);
+    env.send(
+        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[],
+    )
+    .expect("resolve a jackpot");
 
     // 100x the stake would be far more than the pot holds, so the cap binds: half the
     // pot, which is still many times the regular win.
@@ -929,25 +1096,17 @@ fn losing_tickets_pay_nothing_and_still_close() {
     let t = trader(&mut env, &m, 10_000_000_000);
     let (trader_key, _, trader_token) = (t.0.pubkey(), t.1, t.2);
     let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let buy_slot = current_slot(&env);
     let (stake, pot) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    let reveal = buy_slot + REVEAL_DELAY;
 
-    env.svm.warp_to_slot(reveal + 1);
-    set_slot_hashes(
-        &mut env,
-        &[(reveal, hash_that(&ticket_key, buy_slot, LOSE))],
-    );
-    env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
-        .expect("resolve a loss");
+    fulfil(&mut env, &ticket_key, LOSE);
+    let resolve = resolve_ticket_ix(&env, &m, &trader_key, &trader_token);
+    env.send(&[resolve.clone()], &[]).expect("resolve a loss");
     assert_eq!(env.token_balance(&trader_token), stake);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
     assert_eq!(ticket(&env, &ticket_key), None);
 
     // Resolving a closed ticket fails.
-    assert!(env
-        .send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
-        .is_err());
+    assert!(env.send(&[resolve], &[]).is_err());
 }
 
 #[test]
@@ -959,13 +1118,16 @@ fn tickets_left_past_the_resolve_window_expire_without_a_payout() {
     let ticket_key = ticket_pda(&m.curve, &trader_key);
     let buy_slot = current_slot(&env);
     let (stake, pot) = gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    let reveal = buy_slot + REVEAL_DELAY;
 
-    // Even a winning hash pays nothing once the window has passed.
-    env.svm.warp_to_slot(reveal + RESOLVE_WINDOW_SLOTS + 1);
-    set_slot_hashes(&mut env, &[(reveal, hash_that(&ticket_key, buy_slot, WIN))]);
-    env.send(&[resolve_ticket_ix(&m, &trader_key, &trader_token)], &[])
-        .expect("expire");
+    // Even fulfilled winning randomness pays nothing once the window has passed, and
+    // an expired ticket closes without any randomness at all.
+    env.svm.warp_to_slot(buy_slot + RESOLVE_WINDOW + 1);
+    fulfil(&mut env, &ticket_key, WIN);
+    env.send(
+        &[resolve_ticket_ix(&env, &m, &trader_key, &trader_token)],
+        &[],
+    )
+    .expect("expire");
     assert_eq!(env.token_balance(&trader_token), stake);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
     assert_eq!(ticket(&env, &ticket_key), None);
@@ -981,12 +1143,12 @@ fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_launchpad() 
     // A buy and a sell leave fees in both mints.
     let amount = 5_000_000_000;
     let (got, _) = price_buy(&env, &m, amount);
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     env.send(&[client::swap(&accounts, &exact_in(amount, got))], &[&t.0])
         .expect("buy");
     let sold = got / 2;
     let (back, _) = price_sell(&env, &m, sold);
-    let accounts = swap_accounts(&m, &trader_key, false, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, false, None, &trader_quote, &trader_token);
     env.send(&[client::swap(&accounts, &exact_in(sold, back))], &[&t.0])
         .expect("sell");
     let (creator_quote, creator_token, protocol_quote, protocol_token) = owed(&env, &m);
@@ -1038,7 +1200,7 @@ fn fees_accrue_in_the_vaults_and_are_claimed_by_the_creator_and_the_launchpad() 
     assert_eq!(env.token_balance(&m.quote_vault), quote_reserve);
     assert_eq!(env.token_balance(&m.token_vault), token_reserve);
     let (got, _) = price_buy(&env, &m, 1_000_000_000);
-    let accounts = swap_accounts(&m, &trader_key, true, false, &trader_quote, &trader_token);
+    let accounts = swap_accounts(&m, &trader_key, true, None, &trader_quote, &trader_token);
     env.send(
         &[client::swap(&accounts, &exact_in(1_000_000_000, got))],
         &[&t.0],
@@ -1058,17 +1220,17 @@ fn wins_are_paid_only_to_the_tickets_trader() {
     let t = trader(&mut env, &m, 10_000_000_000);
     let trader_key = t.0.pubkey();
     let ticket_key = ticket_pda(&m.curve, &trader_key);
-    let buy_slot = current_slot(&env);
     gacha_buy(&mut env, &m, &t, 1_000_000_000);
-    let reveal = buy_slot + REVEAL_DELAY;
-    env.svm.warp_to_slot(reveal + 1);
-    set_slot_hashes(&mut env, &[(reveal, hash_that(&ticket_key, buy_slot, WIN))]);
+    fulfil(&mut env, &ticket_key, WIN);
 
     // A keeper pointing the payout at their own token account is refused.
     let keeper = Pubkey::new_unique();
     let keeper_token = env.create_ata(&keeper, &m.token_mint, &TOKEN);
     assert!(env
-        .send(&[resolve_ticket_ix(&m, &trader_key, &keeper_token)], &[])
+        .send(
+            &[resolve_ticket_ix(&env, &m, &trader_key, &keeper_token)],
+            &[]
+        )
         .is_err());
     assert_eq!(ticket(&env, &ticket_key).map(|t| t.0), Some(true));
 }

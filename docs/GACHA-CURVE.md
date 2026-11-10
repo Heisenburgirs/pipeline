@@ -60,7 +60,7 @@ reflect every fee.
 | `win_one_in: u32` | A gacha buy wins with probability 1 in this many |
 | `bonus_bps: u16` | Win size, in basis points of the buyer's base output |
 | `max_win_pot_bps: u16` | Cap on one win, in basis points of the pot's balance |
-| `reveal_delay_slots: u64` | Slots between a gacha buy and the slot whose block hash decides it |
+| `resolve_window_slots: u64` | A ticket must be resolved within this many slots of its buy, or it pays nothing |
 | `pot_fee_bps: u16` | Fee on every trade, in basis points of the input, paid into the pot |
 | `curve_fee_bps: u16` | Fee on every trade, left in the curve's reserves |
 | `creator_fee_bps: u16` | Fee on every trade for the creator, at most 500 |
@@ -91,7 +91,11 @@ fees and gets the same output as a plain buy. The strategy:
    **base** output, and what `pipeline_quote` returns;
 2. spends the pot fee on the curve as it stands after the base buy and sends what it buys
    to the pot vault;
-3. arms the buyer's **ticket** with the current slot and the base amount.
+3. arms the buyer's **ticket** with the current slot, the base amount and a fresh
+   randomness **seed**, `sha256("gacha-vrf" ‖ ticket ‖ nonce ‖ round)`, where `nonce`
+   was assigned from a counter on the curve when the ticket was opened and `round`
+   counts the ticket's gacha buys. The ORAO randomness account for that seed must not
+   exist yet.
 
 A ticket is a PDA `["ticket", curve, trader]`, one per trader per curve. The trader opens
 it with the `open_ticket` custom action (paying its rent) in the same transaction as the
@@ -99,17 +103,25 @@ swap, before it. A trader with an armed ticket can still buy and sell normally, 
 make another gacha buy until the ticket is resolved.
 
 Account resolution returns the output vault and the pot vault for every trade, and for a
-gacha buy also the ticket (only when the quote names a trader). Transfer-hook accounts for
-the quote mint follow as usual.
+gacha buy also the ticket and the ORAO randomness account of its next seed (only when the
+quote names a trader; the randomness account comes in a second round, once the ticket's
+data is in hand). Transfer-hook accounts for the quote mint follow as usual.
 
 ## Resolving a ticket
 
-Anyone can call `resolve_ticket` once the chain has a block at or after the ticket's
-reveal slot (`buy slot + reveal_delay_slots`). The roll is
-`sha256(block hash ‖ ticket ‖ buy slot)` read as a little-endian `u64`; a multiple of
-`jackpot_one_in` is a jackpot, otherwise a multiple of `win_one_in` is a win. The block hash is that of the first block at or after the
-reveal slot, read from the SlotHashes sysvar, so a skipped slot moves to the next block
-rather than blocking resolution.
+The randomness comes from the [ORAO VRF](https://github.com/orao-network/solana-vrf),
+program `VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y` on devnet and mainnet. After the
+buy, the trader (or anyone) sends ORAO's `request_v2` with the ticket's seed, paying
+ORAO's request fee (0.0003 SOL on devnet); the oracles fulfil it within seconds into the
+account `["orao-vrf-randomness-request", seed]` under the VRF program. The strategy
+never calls ORAO: it only reads that account.
+
+Anyone can then call `resolve_ticket` with that account. The strategy checks it is the
+account for the ticket's seed, owned by the VRF program, fulfilled, and carrying the same
+seed, then reads the 64 bytes of randomness. The roll is their first 8 bytes as a
+little-endian `u64`; a multiple of `jackpot_one_in` is a jackpot, otherwise a multiple
+of `win_one_in` is a win. Until the account is fulfilled, resolution fails with
+`NotFulfilled`.
 
 A win pays `min(bonus_bps × stake, max_win_pot_bps × pot)` and a jackpot
 `min(jackpot_bps × stake, max_jackpot_pot_bps × pot)` from the pot to any token account
@@ -118,32 +130,38 @@ rather than being a flat share of the pot, so tiny buys are not the cheapest way
 tickets. Win or lose, the ticket closes
 and its rent returns to the trader. The outcome is published as a `TicketResolved` event.
 
-**Tickets expire.** A ticket must be resolved within 400 slots of its reveal slot
-(`RESOLVE_WINDOW_SLOTS`). Later than that it pays nothing, win or not, and closes. The
-SlotHashes sysvar keeps 512 entries, so inside the window the deciding block is still
-present and the outcome cannot change. Without the window, a losing trader could wait for
-the ring to roll past the reveal slot and get a fresh roll from a later block. Front-ends
-should resolve for their users promptly; a keeper can resolve everyone's.
+**Tickets expire.** A ticket must be resolved within `resolve_window_slots` of its buy.
+Later than that it pays nothing, win or not, and closes (no randomness account is needed
+to close an expired ticket). Without the window, a trader whose randomness came back a
+winner could sit on it until the pot was bigger. Front-ends should request the randomness
+right after the buy and resolve for their users as soon as it is fulfilled; a keeper can
+resolve everyone's.
 
 ### Why the roll is not decided in the buy
 
 A roll decided inside the swap can be filtered for free. The router guarantees the trader
 at least `min_amount_out`, so a trader sets that to the jackpot amount and submits; losing
-rolls revert and cost only the transaction fee, and no fee is ever collected on them. Deciding with a block hash that does not exist yet when the buy lands closes that,
-and it keeps `pipeline_quote` and `pipeline_swap` in agreement: both return the base
-amount, and the bonus never passes through the router.
+rolls revert and cost only the transaction fee, and no fee is ever collected on them.
+Deciding with randomness that does not exist yet when the buy lands closes that, and it
+keeps `pipeline_quote` and `pipeline_swap` in agreement: both return the base amount,
+and the bonus never passes through the router.
 
-Block leaders can influence their block's hash, so this is fine for prizes smaller than
-what a leader could earn by trying, which `max_win_pot_bps` bounds. For large prizes,
-swap the slot hash for a VRF.
+The seed is fixed by the ticket, its nonce and its round counter, so it is known before
+the buy.
+What stops a trader from requesting it early, seeing the outcome and only then buying is
+that the buy refuses to arm (`SeedAlreadyRequested`) if the randomness account for the
+next seed already exists, pending or fulfilled. Since the only way to move a ticket to
+its next seed is a gacha buy, no outcome can be learned before the buy that commits to
+it. The randomness itself is ORAO's: oracle signatures over the seed, verifiable and not
+influenceable by block leaders, so it is fit for large jackpots.
 
 ## Custom actions
 
 | Action | Signer | Accounts |
 |---|---|---|
-| `open_ticket` | trader | trader (writable), curve, ticket (writable), system program |
+| `open_ticket` | trader | trader (writable), curve (writable), ticket (writable), system program |
 | `close_ticket` (unarmed only) | trader | trader (writable), ticket (writable) |
-| `resolve_ticket` | anyone | ticket (writable), curve, trader (writable), pot vault (writable), trader's token account (writable), token mint, SPL Token, SlotHashes sysvar |
+| `resolve_ticket` | anyone | ticket (writable), curve, trader (writable), pot vault (writable), trader's token account (writable), token mint, SPL Token, the ORAO randomness account for the ticket's seed |
 | `claim_fees` | the market's creator, or the program's upgrade authority | claimant (signer), curve (writable), quote vault (writable), token vault (writable), claimant's quote token account (writable), claimant's token account (writable), quote mint, token mint, quote token program, SPL Token, this program's ProgramData; then any transfer-hook accounts of the quote mint |
 
 Discriminators are Anchor's `sha256("global:<name>")[..8]`. The tests in
@@ -165,7 +183,7 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, 10-slot reveal, 9-decimal test quote) | [`EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64`](https://orbmarkets.io/address/EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64/history?cluster=devnet) |
+| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, ORAO VRF, 1,500-slot resolve window, 9-decimal test quote) | [`EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64`](https://orbmarkets.io/address/EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64/history?cluster=devnet) |
 | Demo token | `AUMrvGDDG8W2sK7x87AV5CVpH8tj3bNdJryJyn8cR6wm` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the
