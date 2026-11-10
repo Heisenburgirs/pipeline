@@ -27,6 +27,7 @@ import {
     createSolanaRpcSubscriptions,
     createTransactionMessage,
     generateKeyPairSigner,
+    getAddressDecoder,
     getAddressEncoder,
     getProgramDerivedAddress,
     getSignatureFromTransaction,
@@ -53,7 +54,8 @@ import * as pipeline from '@pipeline-placeholder/sdk';
 const LAUNCH_PROGRAM = address('4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA');
 const GACHA_PROGRAM = address('2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G');
 const SYSTEM_PROGRAM = address('11111111111111111111111111111111');
-const SLOT_HASHES = address('SysvarS1otHashes111111111111111111111111111');
+// ORAO VRF on devnet and mainnet: tickets are decided by randomness it fulfils.
+const ORAO_VRF = address('VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y');
 
 // Launch curve: the default preset from docs/LAUNCH-CURVE.md. A 1B supply against a
 // 6-decimal quote, starting at a $100k market cap and graduating at $1B (a $1.00 final
@@ -70,7 +72,8 @@ const LAUNCH = {
     creatorFeeBps: 30,
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 1-in-100 for a 20% bonus capped
-// at 10% of the pot and 1-in-100,000 for a 100x jackpot, decided 10 slots after the buy. Every trade pays 0.5%: 0.3% to the
+// at 10% of the pot and 1-in-100,000 for a 100x jackpot, decided by ORAO VRF randomness
+// requested after the buy and resolved within 1,500 slots. Every trade pays 0.5%: 0.3% to the
 // pot, 0.05% left in the curve, 0.05% to the creator and 0.1% to the program authority.
 // See docs/GACHA-CURVE.md.
 const GACHA = {
@@ -80,7 +83,7 @@ const GACHA = {
     winOneIn: 100,
     bonusBps: 2_000,
     maxWinPotBps: 1_000,
-    revealDelaySlots: 10n,
+    resolveWindowSlots: 1_500n,
     potFeeBps: 30,
     curveFeeBps: 5,
     creatorFeeBps: 5,
@@ -395,7 +398,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u32(GACHA.winOneIn),
         u16(GACHA.bonusBps),
         u16(GACHA.maxWinPotBps),
-        u64(GACHA.revealDelaySlots),
+        u64(GACHA.resolveWindowSlots),
         u16(GACHA.potFeeBps),
         u16(GACHA.curveFeeBps),
         u16(GACHA.creatorFeeBps),
@@ -439,7 +442,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
         programAddress: GACHA_PROGRAM,
         accounts: [
             { address: wallet.address, role: AccountRole.WRITABLE_SIGNER },
-            { address: curve, role: AccountRole.READONLY },
+            { address: curve, role: AccountRole.WRITABLE },
             { address: ticket, role: AccountRole.WRITABLE },
             { address: SYSTEM_PROGRAM, role: AccountRole.READONLY },
         ],
@@ -456,11 +459,41 @@ async function gachaDemo(wallet: KeyPairSigner) {
     const ticketData = await accountData(ticket);
     if (!ticketData || ticketData[72] !== 1) throw new Error('ticket is not armed');
     const buySlot = new DataView(ticketData.buffer, ticketData.byteOffset).getBigUint64(73, true);
-    const revealSlot = buySlot + GACHA.revealDelaySlots;
-    log(`ticket ${ticket} armed at slot ${buySlot}; reveal slot ${revealSlot}`);
-    while ((await currentSlot()) < revealSlot + 2n) {
-        await new Promise((resolve) => setTimeout(resolve, 1_500));
+    // The seed the buy armed the ticket with (bytes 93..125), which names ORAO's
+    // randomness request account.
+    const seed = ticketData.slice(93, 125);
+    const randomness = await pda(ORAO_VRF, ['orao-vrf-randomness-request', seed]);
+    log(`ticket ${ticket} armed at slot ${buySlot}; seed ${Buffer.from(seed).toString('hex')}`);
+
+    // Ask ORAO for randomness for that seed: request_v2(seed), paying its request fee.
+    const networkState = await pda(ORAO_VRF, ['orao-vrf-network-configuration']);
+    const networkData = await accountData(networkState);
+    if (!networkData) throw new Error('ORAO VRF is not set up on this cluster');
+    const treasury = getAddressDecoder().decode(networkData.slice(40, 72));
+    const requestSignature = await send(wallet, [
+        {
+            programAddress: ORAO_VRF,
+            accounts: [
+                { address: wallet.address, role: AccountRole.WRITABLE_SIGNER },
+                { address: networkState, role: AccountRole.WRITABLE },
+                { address: treasury, role: AccountRole.WRITABLE },
+                { address: randomness, role: AccountRole.WRITABLE },
+                { address: SYSTEM_PROGRAM, role: AccountRole.READONLY },
+            ],
+            data: concat(hex('2697d106c3661cd9'), seed), // sha256("global:request_v2")[..8]
+        },
+    ]);
+    log(`ORAO request ${requestSignature}; waiting for the oracles`);
+    const started = Date.now();
+    let fulfilled: Uint8Array | null = null;
+    while (!fulfilled) {
+        const data = await accountData(randomness);
+        // RandomnessV2: 8-byte discriminator, then 1 = Fulfilled { client, seed, randomness[64] }.
+        if (data && data[8] === 1) fulfilled = data.slice(73, 137);
+        else if (Date.now() - started > 120_000) throw new Error('ORAO did not fulfil within 2 minutes');
+        else await new Promise((resolve) => setTimeout(resolve, 1_500));
     }
+    log(`randomness fulfilled: ${Buffer.from(fulfilled).toString('hex').slice(0, 32)}… after ${((Date.now() - started) / 1000).toFixed(1)}s`);
 
     const traderToken = await ata(wallet.address, tokenMint.address);
     const before = await tokenBalance(traderToken);
@@ -474,7 +507,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
             { address: traderToken, role: AccountRole.WRITABLE },
             { address: tokenMint.address, role: AccountRole.READONLY },
             { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
-            { address: SLOT_HASHES, role: AccountRole.READONLY },
+            { address: randomness, role: AccountRole.READONLY },
         ],
         data: hex('d5c239720de3a005'),
     };
@@ -483,7 +516,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
     const closed = (await accountData(ticket)) === null;
     log(`ticket resolved: ${payout > 0n ? `WON ${(Number(payout) / 1e6).toFixed(2)} tokens from the pot` : 'lost (1-in-100 odds)'}, ticket closed: ${closed}, ${resolveSignature}`);
     if (!closed) throw new Error('ticket should be closed after resolution');
-    return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature, resolve: resolveSignature, payout };
+    return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature, request: requestSignature, resolve: resolveSignature, payout };
 }
 
 async function main() {
