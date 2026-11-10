@@ -1,4 +1,4 @@
-// Registers the launch-curve and gacha-curve strategies with Pipeline on a cluster and
+// Registers the launch-curve, gacha-curve and perp-curve strategies with Pipeline on a cluster and
 // creates a demo market on each: a buy on the launch curve, and a buy into a pack, a
 // draw opened against ORAO randomness and a payout check on the gacha curve.
 //
@@ -10,8 +10,10 @@
 //                          for the registration step (skipped if already registered)
 //   LAUNCH_METADATA_URI    metadata JSON for the launch curve (used when registering)
 //   GACHA_METADATA_URI     metadata JSON for the gacha curve
-//   ONLY                   "launch" or "gacha" to run one of the two
+//   PERP_METADATA_URI      metadata JSON for the perp curve
+//   ONLY                   "launch", "gacha" or "perp" to run one of the three
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -53,6 +55,9 @@ import * as pipeline from '@pipeline-placeholder/sdk';
 
 const LAUNCH_PROGRAM = address('4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA');
 const GACHA_PROGRAM = address('2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G');
+const PERP_PROGRAM = address('4LHmX6x7xgB2eNeuRsuF3U3huhFoyfYeddRLzsBwzvPc');
+// The minimal perp venue the perp curve holds its position on.
+const VENUE = address('8FcD14vCkywa5zPAMmy3g9VpnESJYUZM36c6hzJBdsYi');
 const SYSTEM_PROGRAM = address('11111111111111111111111111111111');
 // ORAO VRF on devnet and mainnet: draws are decided by randomness it fulfils.
 const ORAO_VRF = address('VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y');
@@ -70,6 +75,14 @@ const LAUNCH = {
     // 0.3% of every trade to the token's creator; the program adds 0.2% for its
     // upgrade authority.
     creatorFeeBps: 30,
+};
+// Perp curve: the launch curve's preset plus a 2x long SOL-PERP treasury fed by 0.3% of
+// every trade, deployed whenever at least $0.10 has accrued.
+const PERP = {
+    direction: 0,
+    leverage: 2,
+    perpFeeBps: 30,
+    minDeploy: 100_000n,
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 1-in-100 for a 20% bonus capped
 // at 10% of the pot and 1-in-100,000 for a 100x jackpot, decided by ORAO VRF randomness
@@ -203,6 +216,23 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 }
 function hex(bytes: string): Uint8Array {
     return Uint8Array.from(Buffer.from(bytes, 'hex'));
+}
+/** Anchor's instruction discriminator: sha256("global:<name>")[..8]. */
+function disc(name: string): Uint8Array {
+    return Uint8Array.from(createHash('sha256').update(`global:${name}`).digest().subarray(0, 8));
+}
+
+/** SOL in USD from CoinGecko, as 6-decimal quote units; $150 if that fails. */
+async function solPrice(): Promise<bigint> {
+    try {
+        const response = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+        const json = (await response.json()) as { solana?: { usd?: number } };
+        const usd = json.solana?.usd;
+        if (usd && usd > 0) return BigInt(Math.round(usd * 1e6));
+    } catch {
+        // fall through
+    }
+    return 150n * USD;
 }
 
 /** Registers `program` if it is not registered yet, paying the listing fee. */
@@ -525,13 +555,172 @@ async function gachaDemo(wallet: KeyPairSigner) {
     return { marketAddress, tokenMint: tokenMint.address, quoteMint, pack, swap: signature, request: requestSignature, openDraw: openSignature, payout };
 }
 
+// ------------------------------------------------------------------- perp curve
+
+async function perpDemo(wallet: KeyPairSigner) {
+    await register(wallet, PERP_PROGRAM, process.env.PERP_METADATA_URI, 'perp-curve');
+
+    // A "USDC" for the wallet, which is also the venue's collateral.
+    const quoteMint = await createQuoteMint(wallet, 6, 1_000_000n * USD);
+
+    // A SOL-PERP market on the venue at the live SOL price, with $100k of house
+    // liquidity in its vault so winners can be paid. The venue keys markets by symbol,
+    // so each demo run gets its own suffix.
+    const symbol = new Uint8Array(16);
+    symbol.set(Buffer.from(`SOL-PERP-${Math.random().toString(16).slice(2, 6)}`));
+    const venueMarket = await pda(VENUE, ['market', symbol]);
+    const venueVault = await pda(VENUE, ['vault', encoder.encode(venueMarket)]);
+    const price = await solPrice();
+    await send(wallet, [
+        {
+            programAddress: VENUE,
+            accounts: [
+                { address: wallet.address, role: AccountRole.WRITABLE_SIGNER },
+                { address: venueMarket, role: AccountRole.WRITABLE },
+                { address: quoteMint, role: AccountRole.READONLY },
+                { address: venueVault, role: AccountRole.WRITABLE },
+                { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+                { address: SYSTEM_PROGRAM, role: AccountRole.READONLY },
+            ],
+            data: concat(disc('create_market'), symbol, u64(price)),
+        },
+        getMintToInstruction({ mint: quoteMint, token: venueVault, mintAuthority: wallet, amount: 100_000n * USD }),
+    ]);
+    log(`venue market ${venueMarket} (${Buffer.from(symbol).toString().replace(/\0+$/, '')}) at $${Number(price) / 1e6} per SOL, vault seeded with $100,000`);
+
+    // The token: the launch curve's preset, plus a 2x long treasury on that market.
+    const tokenMint = await generateKeyPairSigner();
+    const launch = await pda(PERP_PROGRAM, ['launch', encoder.encode(tokenMint.address)]);
+    const quoteVault = await pda(PERP_PROGRAM, ['quote_vault', encoder.encode(launch)]);
+    const tokenVault = await pda(PERP_PROGRAM, ['token_vault', encoder.encode(launch)]);
+    const position = await pda(VENUE, ['position', encoder.encode(venueMarket), encoder.encode(launch)]);
+    const initData = concat(
+        u64(LAUNCH.supply),
+        u64(LAUNCH.curveSupply),
+        u64(LAUNCH.virtualQuote),
+        u64(LAUNCH.virtualToken),
+        u16(LAUNCH.poolFeeBps),
+        u16(LAUNCH.creatorFeeBps),
+        encoder.encode(wallet.address),
+        encoder.encode(venueMarket),
+        new Uint8Array([PERP.direction, PERP.leverage]),
+        u16(PERP.perpFeeBps),
+        u64(PERP.minDeploy),
+    );
+    await send(
+        wallet,
+        [
+            await pipeline.createMarket({
+                creator: wallet.address,
+                strategyProgram: PERP_PROGRAM,
+                marketState: launch,
+                initData,
+                maxCreatorLamports: 100_000_000n,
+                strategyAccounts: [
+                    { address: quoteMint, role: AccountRole.READONLY },
+                    { address: tokenMint.address, role: AccountRole.WRITABLE_SIGNER },
+                    { address: quoteVault, role: AccountRole.WRITABLE },
+                    { address: tokenVault, role: AccountRole.WRITABLE },
+                    { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+                    { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+                ],
+            }),
+        ],
+        [tokenMint],
+    );
+    const marketAddress = await pipeline.marketPda(PERP_PROGRAM, launch);
+    await send(wallet, [
+        await pipeline.initFeeAccount({ payer: wallet.address, market: marketAddress, mint: quoteMint, tokenProgram: TOKEN_PROGRAM_ADDRESS }),
+        await pipeline.initFeeAccount({ payer: wallet.address, market: marketAddress, mint: tokenMint.address, tokenProgram: TOKEN_PROGRAM_ADDRESS }),
+        await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: wallet, owner: wallet.address, mint: tokenMint.address }),
+    ]);
+    log(`perp-curve market ${marketAddress}: token ${tokenMint.address}, quote ${quoteMint}, launch ${launch}`);
+
+    // Buy $1,000: 0.3% of it, $3, waits in the treasury.
+    const amount = 1_000n * USD;
+    const { quote, received, signature } = await quoteAndSwap(
+        wallet, PERP_PROGRAM, launch, [quoteMint, tokenMint.address], [quoteVault, tokenVault], true, amount, new Uint8Array(),
+    );
+    if (quote !== received) throw new Error('received differs from quote');
+    log(`perp-curve buy: $${Number(amount) / 1e6} -> ${(Number(received) / 1e6).toFixed(2)} tokens ${signature}`);
+
+    // Anyone deploys the treasury into the position; the wallet pays the rent here.
+    const deploy: Instruction = {
+        programAddress: PERP_PROGRAM,
+        accounts: [
+            { address: wallet.address, role: AccountRole.WRITABLE_SIGNER },
+            { address: launch, role: AccountRole.WRITABLE },
+            { address: quoteVault, role: AccountRole.WRITABLE },
+            { address: tokenVault, role: AccountRole.WRITABLE },
+            { address: tokenMint.address, role: AccountRole.WRITABLE },
+            { address: venueMarket, role: AccountRole.READONLY },
+            { address: position, role: AccountRole.WRITABLE },
+            { address: venueVault, role: AccountRole.WRITABLE },
+            { address: quoteMint, role: AccountRole.READONLY },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: VENUE, role: AccountRole.READONLY },
+            { address: SYSTEM_PROGRAM, role: AccountRole.READONLY },
+        ],
+        data: disc('deploy'),
+    };
+    const deploySignature = await send(wallet, [deploy]);
+    const positionData = await accountData(position);
+    if (!positionData) throw new Error('no position after deploy');
+    const pv = new DataView(positionData.buffer, positionData.byteOffset);
+    const collateral = pv.getBigUint64(74, true);
+    const base = pv.getBigUint64(82, true);
+    log(`deployed: position ${position} holds $${Number(collateral) / 1e6} of collateral, ${(Number(base) / 1e6).toFixed(4)} SOL of 2x long base ${deploySignature}`);
+
+    // SOL rises 20% (the venue's authority is the wallet, standing in for an oracle),
+    // and the holder burns a tenth of their tokens into the position.
+    const higher = (price * 120n) / 100n;
+    await send(wallet, [
+        {
+            programAddress: VENUE,
+            accounts: [
+                { address: wallet.address, role: AccountRole.READONLY_SIGNER },
+                { address: venueMarket, role: AccountRole.WRITABLE },
+            ],
+            data: concat(disc('set_price'), u64(higher)),
+        },
+    ]);
+    const walletToken = await ata(wallet.address, tokenMint.address);
+    const walletQuote = await ata(wallet.address, quoteMint);
+    const burn = received / 10n;
+    const quoteBefore = await tokenBalance(walletQuote);
+    const burnToClose: Instruction = {
+        programAddress: PERP_PROGRAM,
+        accounts: [
+            { address: wallet.address, role: AccountRole.READONLY_SIGNER },
+            { address: launch, role: AccountRole.WRITABLE },
+            { address: walletToken, role: AccountRole.WRITABLE },
+            { address: walletQuote, role: AccountRole.WRITABLE },
+            { address: tokenMint.address, role: AccountRole.WRITABLE },
+            { address: quoteMint, role: AccountRole.READONLY },
+            { address: venueMarket, role: AccountRole.READONLY },
+            { address: position, role: AccountRole.WRITABLE },
+            { address: venueVault, role: AccountRole.WRITABLE },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
+            { address: VENUE, role: AccountRole.READONLY },
+        ],
+        data: concat(disc('burn_to_close'), u64(burn)),
+    };
+    const burnSignature = await send(wallet, [burnToClose]);
+    const payout = (await tokenBalance(walletQuote)) - quoteBefore;
+    log(`SOL marked up 20%; burned ${(Number(burn) / 1e6).toFixed(2)} tokens (a tenth of the supply in hand) into the position for $${Number(payout) / 1e6} ${burnSignature}`);
+    return { marketAddress, tokenMint: tokenMint.address, quoteMint, venueMarket, position, swap: signature, deploy: deploySignature, burnToClose: burnSignature, payout };
+}
+
 async function main() {
     const wallet = await loadWallet();
     log(`RPC ${rpcUrl}, wallet ${wallet.address}`);
     const only = process.env.ONLY;
     const results: Record<string, unknown> = {};
-    if (only !== 'gacha') results.launch = await launchDemo(wallet);
-    if (only !== 'launch') results.gacha = await gachaDemo(wallet);
+    if (!only || only === 'launch') results.launch = await launchDemo(wallet);
+    if (!only || only === 'gacha') results.gacha = await gachaDemo(wallet);
+    if (!only || only === 'perp') results.perp = await perpDemo(wallet);
     console.log(JSON.stringify(results, (_, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
     process.exit(0);
 }

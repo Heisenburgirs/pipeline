@@ -8,6 +8,8 @@ members = [
     "test-hook",
     "test-hook-refill",
     "launch-curve",
+    "test-perp",
+    "perp-curve",
 ]
 
 [profile.release]
