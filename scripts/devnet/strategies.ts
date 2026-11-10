@@ -1,6 +1,6 @@
 // Registers the launch-curve and gacha-curve strategies with Pipeline on a cluster and
-// creates a demo market on each: a buy on the launch curve, and a gacha buy, ticket
-// resolution and payout check on the gacha curve.
+// creates a demo market on each: a buy on the launch curve, and a buy into a pack, a
+// draw opened against ORAO randomness and a payout check on the gacha curve.
 //
 // Usage:
 //   RPC_URL=https://api.devnet.solana.com KEYPAIR=~/.config/solana/id.json node strategies.ts
@@ -54,7 +54,7 @@ import * as pipeline from '@pipeline-placeholder/sdk';
 const LAUNCH_PROGRAM = address('4scUVyL9JbLjvkppBk8PYNGRPMCQfp7ppdBFkthDYPLA');
 const GACHA_PROGRAM = address('2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G');
 const SYSTEM_PROGRAM = address('11111111111111111111111111111111');
-// ORAO VRF on devnet and mainnet: tickets are decided by randomness it fulfils.
+// ORAO VRF on devnet and mainnet: draws are decided by randomness it fulfils.
 const ORAO_VRF = address('VRFzZoJdhFWL8rkvu87LpKM3RbcVezpMEc6X5GVDr7y');
 
 // Launch curve: the default preset from docs/LAUNCH-CURVE.md. A 1B supply against a
@@ -73,7 +73,8 @@ const LAUNCH = {
 };
 // Gacha curve: a 1B supply against a 9-decimal quote, 1-in-100 for a 20% bonus capped
 // at 10% of the pot and 1-in-100,000 for a 100x jackpot, decided by ORAO VRF randomness
-// requested after the buy and resolved within 1,500 slots. Every trade pays 0.5%: 0.3% to the
+// requested when a draw is opened; draws opened within 1,500 slots of the buy are capped
+// by the live pot. Every trade pays 0.5%: 0.3% to the
 // pot, 0.05% left in the curve, 0.05% to the creator and 0.1% to the program authority.
 // See docs/GACHA-CURVE.md.
 const GACHA = {
@@ -83,7 +84,7 @@ const GACHA = {
     winOneIn: 100,
     bonusBps: 2_000,
     maxWinPotBps: 1_000,
-    resolveWindowSlots: 1_500n,
+    freshWindowSlots: 1_500n,
     potFeeBps: 30,
     curveFeeBps: 5,
     creatorFeeBps: 5,
@@ -390,7 +391,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
     const quoteVault = await pda(GACHA_PROGRAM, ['quote_vault', encoder.encode(curve)]);
     const tokenVault = await pda(GACHA_PROGRAM, ['token_vault', encoder.encode(curve)]);
     const potVault = await pda(GACHA_PROGRAM, ['pot', encoder.encode(curve)]);
-    const ticket = await pda(GACHA_PROGRAM, ['ticket', encoder.encode(curve), encoder.encode(wallet.address)]);
+    const pack = await pda(GACHA_PROGRAM, ['pack', encoder.encode(curve), encoder.encode(wallet.address), u16(0)]);
     const initData = concat(
         u64(GACHA.supply),
         u64(GACHA.virtualQuote),
@@ -398,7 +399,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u32(GACHA.winOneIn),
         u16(GACHA.bonusBps),
         u16(GACHA.maxWinPotBps),
-        u64(GACHA.resolveWindowSlots),
+        u64(GACHA.freshWindowSlots),
         u16(GACHA.potFeeBps),
         u16(GACHA.curveFeeBps),
         u16(GACHA.creatorFeeBps),
@@ -437,33 +438,37 @@ async function gachaDemo(wallet: KeyPairSigner) {
     ]);
     log(`gacha-curve market ${marketAddress}: token ${tokenMint.address}, quote ${quoteMint}, curve ${curve}`);
 
-    // A gacha buy of 2 quote units, with open_ticket in the same transaction before it.
-    const openTicket: Instruction = {
+    // A buy of 2 quote units into pack 0, opened in the same transaction before it.
+    // The pack index in `extra` is what makes the buy drop a draw.
+    const openPack: Instruction = {
         programAddress: GACHA_PROGRAM,
         accounts: [
             { address: wallet.address, role: AccountRole.WRITABLE_SIGNER },
             { address: curve, role: AccountRole.WRITABLE },
-            { address: ticket, role: AccountRole.WRITABLE },
+            { address: pack, role: AccountRole.WRITABLE },
             { address: SYSTEM_PROGRAM, role: AccountRole.READONLY },
         ],
-        data: hex('9a78a6459b6f1bcf'),
+        data: concat(hex('4bcb90413ffd6755'), u16(0)), // sha256("global:open_pack")[..8], index
     };
     const amount = 2_000_000_000n;
     const { quote, received, signature, strategyAccounts } = await quoteAndSwap(
-        wallet, GACHA_PROGRAM, curve, [quoteMint, tokenMint.address], [quoteVault, tokenVault], true, amount, new Uint8Array([1]), [openTicket],
+        wallet, GACHA_PROGRAM, curve, [quoteMint, tokenMint.address], [quoteVault, tokenVault], true, amount, u16(0), [openPack],
     );
     const pot = await tokenBalance(potVault);
-    log(`gacha buy: ${Number(amount) / 1e9} quote -> ${(Number(received) / 1e6).toFixed(2)} tokens (quote ${quote}), pot now holds ${(Number(pot) / 1e6).toFixed(2)} tokens, ${strategyAccounts.length} strategy accounts ${signature}`);
+    log(`buy into pack 0: ${Number(amount) / 1e9} quote -> ${(Number(received) / 1e6).toFixed(2)} tokens (quote ${quote}), pot now holds ${(Number(pot) / 1e6).toFixed(2)} tokens, ${strategyAccounts.length} strategy accounts ${signature}`);
     if (quote !== received) throw new Error('received differs from quote');
 
-    const ticketData = await accountData(ticket);
-    if (!ticketData || ticketData[72] !== 1) throw new Error('ticket is not armed');
-    const buySlot = new DataView(ticketData.buffer, ticketData.byteOffset).getBigUint64(73, true);
-    // The seed the buy armed the ticket with (bytes 93..125), which names ORAO's
-    // randomness request account.
-    const seed = ticketData.slice(93, 125);
+    // Draw 0 of the pack: state (1 = armed), stake, pot at buy, slot, seed; 57 bytes
+    // per draw from byte 84.
+    const packData = await accountData(pack);
+    if (!packData || packData[82] !== 1 || packData[84] !== 1) throw new Error('draw 0 is not armed');
+    const view = new DataView(packData.buffer, packData.byteOffset);
+    const stake = view.getBigUint64(85, true);
+    const potAtBuy = view.getBigUint64(93, true);
+    const buySlot = view.getBigUint64(101, true);
+    const seed = packData.slice(109, 141);
     const randomness = await pda(ORAO_VRF, ['orao-vrf-randomness-request', seed]);
-    log(`ticket ${ticket} armed at slot ${buySlot}; seed ${Buffer.from(seed).toString('hex')}`);
+    log(`pack ${pack}: draw 0 armed at slot ${buySlot} for ${(Number(stake) / 1e6).toFixed(2)} tokens (pot at buy ${(Number(potAtBuy) / 1e6).toFixed(2)}); seed ${Buffer.from(seed).toString('hex')}`);
 
     // Ask ORAO for randomness for that seed: request_v2(seed), paying its request fee.
     const networkState = await pda(ORAO_VRF, ['orao-vrf-network-configuration']);
@@ -497,26 +502,27 @@ async function gachaDemo(wallet: KeyPairSigner) {
 
     const traderToken = await ata(wallet.address, tokenMint.address);
     const before = await tokenBalance(traderToken);
-    const resolve: Instruction = {
+    const openDraw: Instruction = {
         programAddress: GACHA_PROGRAM,
         accounts: [
-            { address: ticket, role: AccountRole.WRITABLE },
+            { address: pack, role: AccountRole.WRITABLE },
             { address: curve, role: AccountRole.READONLY },
-            { address: wallet.address, role: AccountRole.WRITABLE },
+            { address: wallet.address, role: AccountRole.READONLY },
             { address: potVault, role: AccountRole.WRITABLE },
             { address: traderToken, role: AccountRole.WRITABLE },
             { address: tokenMint.address, role: AccountRole.READONLY },
             { address: TOKEN_PROGRAM_ADDRESS, role: AccountRole.READONLY },
             { address: randomness, role: AccountRole.READONLY },
         ],
-        data: hex('d5c239720de3a005'),
+        data: concat(hex('70fedce1da84d190'), new Uint8Array([0])), // sha256("global:open_draw")[..8], draw
     };
-    const resolveSignature = await send(wallet, [resolve]);
+    const openSignature = await send(wallet, [openDraw]);
     const payout = (await tokenBalance(traderToken)) - before;
-    const closed = (await accountData(ticket)) === null;
-    log(`ticket resolved: ${payout > 0n ? `WON ${(Number(payout) / 1e6).toFixed(2)} tokens from the pot` : 'lost (1-in-100 odds)'}, ticket closed: ${closed}, ${resolveSignature}`);
-    if (!closed) throw new Error('ticket should be closed after resolution');
-    return { marketAddress, tokenMint: tokenMint.address, quoteMint, swap: signature, request: requestSignature, resolve: resolveSignature, payout };
+    const after = await accountData(pack);
+    const opened = after !== null && after[84] === 2 && after[83] === 1;
+    log(`draw 0 opened: ${payout > 0n ? `WON ${(Number(payout) / 1e6).toFixed(2)} tokens from the pot` : 'lost (1-in-100 odds)'}, marked opened: ${opened}, ${openSignature}`);
+    if (!opened) throw new Error('draw 0 should be marked opened');
+    return { marketAddress, tokenMint: tokenMint.address, quoteMint, pack, swap: signature, request: requestSignature, openDraw: openSignature, payout };
 }
 
 async function main() {
