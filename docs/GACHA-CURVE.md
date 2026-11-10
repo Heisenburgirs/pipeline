@@ -183,9 +183,10 @@ reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, ORAO VRF, 1,500-slot resolve window, 9-decimal test quote) | [`EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64`](https://orbmarkets.io/address/EChtAxyRDpCbyPHTwLyn1yncUUgwXSgWsUFq753Ygc64/history?cluster=devnet) |
-| Demo token | `AUMrvGDDG8W2sK7x87AV5CVpH8tj3bNdJryJyn8cR6wm` |
+| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, ORAO VRF, 1,500-slot resolve window, 9-decimal test quote) | [`GvGQhcrT3U67uyQA9sejeH6axmS1Kg3N2shCxpcXPd6C`](https://orbmarkets.io/address/GvGQhcrT3U67uyQA9sejeH6axmS1Kg3N2shCxpcXPd6C/history?cluster=devnet) |
+| Demo token | `8ATV1u6sSezFdPhuk71GJsQNs5EA2R5F5WF3s78oWpoh` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the
-`launch-curve` branch registered it, created the demo market, made a gacha buy and
-resolved the ticket; run it with `ONLY=gacha` to create your own.
+`launch-curve` branch registered it, created the demo market, made a gacha buy, requested
+the ticket's seed from ORAO (fulfilled in about two seconds) and resolved the ticket; run
+it with `ONLY=gacha` to create your own.
