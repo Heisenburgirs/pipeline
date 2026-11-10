@@ -1100,7 +1100,8 @@ fn losing_tickets_pay_nothing_and_still_close() {
 
     fulfil(&mut env, &ticket_key, LOSE);
     let resolve = resolve_ticket_ix(&env, &m, &trader_key, &trader_token);
-    env.send(&[resolve.clone()], &[]).expect("resolve a loss");
+    env.send(std::slice::from_ref(&resolve), &[])
+        .expect("resolve a loss");
     assert_eq!(env.token_balance(&trader_token), stake);
     assert_eq!(env.token_balance(&m.pot_vault), pot);
     assert_eq!(ticket(&env, &ticket_key), None);
