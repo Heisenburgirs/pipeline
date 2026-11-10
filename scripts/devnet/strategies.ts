@@ -92,6 +92,8 @@ const PERP = {
 // See docs/GACHA-CURVE.md.
 const GACHA = {
     supply: 1_000_000_000n * USD,
+    // pump.fun's shape: 793.1M sell on the curve, the rest is held back for the pool.
+    curveSupply: 793_100_000n * USD,
     virtualQuote: 30_000_000_000n,
     virtualToken: 280_000_000n * USD,
     winOneIn: 100,
@@ -105,6 +107,7 @@ const GACHA = {
     jackpotOneIn: 100_000,
     jackpotBps: 1_000_000,
     maxJackpotPotBps: 5_000,
+    poolFeeBps: 0,
 };
 
 const rpcUrl = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
@@ -424,6 +427,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
     const pack = await pda(GACHA_PROGRAM, ['pack', encoder.encode(curve), encoder.encode(wallet.address), u16(0)]);
     const initData = concat(
         u64(GACHA.supply),
+        u64(GACHA.curveSupply),
         u64(GACHA.virtualQuote),
         u64(GACHA.virtualToken),
         u32(GACHA.winOneIn),
@@ -437,6 +441,7 @@ async function gachaDemo(wallet: KeyPairSigner) {
         u32(GACHA.jackpotOneIn),
         u32(GACHA.jackpotBps),
         u16(GACHA.maxJackpotPotBps),
+        u16(GACHA.poolFeeBps),
     );
     await send(
         wallet,
