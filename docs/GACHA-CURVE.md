@@ -199,8 +199,8 @@ hand and are the reference for account order.
 | | Address |
 |---|---|
 | Program | [`2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G`](https://orbmarkets.io/address/2TmcmquxnCB8AHoLmLJFYxZnVQdm9pREMEsmHqByQq7G/history?cluster=devnet) |
-| Demo market (0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, ORAO VRF, 1,500-slot fresh window, 9-decimal test quote) | [`5cNpJXz2Nf3gohTR6JWUBSQgZd6HTT9PWoxjQbK413Qg`](https://orbmarkets.io/address/5cNpJXz2Nf3gohTR6JWUBSQgZd6HTT9PWoxjQbK413Qg/history?cluster=devnet) |
-| Demo token | `6AawmqpeCnx6E5uSYL4hBwLy9RWw5NxuytrjrBoKgLMb` |
+| Demo market (pump.fun shape graduating at 85 quote; 0.3% pot, 0.1% launchpad, 0.05% creator, 0.05% curve; 1-in-100 for a 20% bonus, 1-in-100,000 for a 100x jackpot, ORAO VRF, 1,500-slot fresh window, 9-decimal test quote) | [`CmDa9bCsmeDHNUp2KYv9DEGMA2nhQcxCkwQoZ7GfagVh`](https://orbmarkets.io/address/CmDa9bCsmeDHNUp2KYv9DEGMA2nhQcxCkwQoZ7GfagVh/history?cluster=devnet) |
+| Demo token | `7v7QG98BhuwdzvTDcqJShrWRrZAV8DkKSUxmjxJVey1N` |
 
 The program is registered with the router. The `strategies.ts` devnet script on the
 `launch-curve` branch registered it, created the demo market, opened a pack, bought into
